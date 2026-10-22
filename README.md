@@ -4,7 +4,18 @@ Reproductor de música local para Linux, escrito en C++ con Qt 6, FFmpeg y PipeW
 Pensado para gastar poca CPU y batería en equipos modestos, y para verse bien
 junto al escritorio [Omarchy](https://omarchy.org), cuyos colores sigue.
 
-![Icono de Sonata](data/sonata.svg)
+<img src="data/sonata.svg" alt="Icono de Sonata" width="96">
+
+![Sonata con la lista a la izquierda y la letra sincronizada a la derecha](docs/capturas/letra.png)
+
+| Ecualizador | Espectro |
+|---|---|
+| ![Ecualizador de 10 bandas con su curva](docs/capturas/ecualizador.png) | ![Espectro en tiempo real](docs/capturas/espectro.png) |
+
+<img src="docs/capturas/media-pantalla.png" alt="A media pantalla: reproducción arriba y lista debajo" width="420">
+
+*A media pantalla, la reproducción se pone encima de la lista. Las canciones, carátulas y
+letras de las capturas son inventadas, y el tema es Cobalt2 de Omarchy.*
 
 ## Qué hace
 
