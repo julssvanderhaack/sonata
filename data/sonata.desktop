@@ -1,0 +1,26 @@
+[Desktop Entry]
+Type=Application
+Name=Sonata
+GenericName=Reproductor de música
+Comment=Reproduce tu música local con letras sincronizadas y ecualizador
+Exec=sonata --play %U
+Icon=sonata
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=sonata;música;music;audio;mp3;flac;letras;lyrics;ecualizador;player;reproductor;
+MimeType=audio/mpeg;audio/mp3;audio/x-mp3;audio/flac;audio/x-flac;audio/ogg;audio/x-vorbis+ogg;audio/vorbis;audio/opus;audio/x-opus+ogg;audio/mp4;audio/m4a;audio/x-m4a;audio/aac;audio/x-aac;audio/x-m4b;audio/wav;audio/x-wav;audio/vnd.wave;audio/x-ape;audio/x-wavpack;audio/x-aiff;audio/aiff;audio/x-ms-wma;audio/x-musepack;audio/x-tta;audio/x-matroska;audio/webm;audio/x-dsf;audio/x-dff;audio/ac3;audio/x-mod;audio/x-xm;audio/x-it;audio/x-s3m;audio/x-mpegurl;audio/mpegurl;application/vnd.apple.mpegurl;audio/amr;audio/amr-wb;audio/basic;audio/matroska;audio/mp2;audio/vnd.dts;audio/vnd.dts.hd;audio/vnd.rn-realaudio;audio/x-aifc;audio/x-adpcm;audio/x-flac+ogg;audio/x-gsm;audio/x-m4r;audio/x-speex;audio/x-speex+ogg;audio/x-tak;audio/x-voc;audio/x-riff;audio/annodex;audio/x-669;audio/x-med;audio/x-mo3;audio/x-mtm;audio/x-stm;audio/x-ult;
+StartupWMClass=sonata
+StartupNotify=false
+Actions=PlayPause;Next;Previous;
+
+[Desktop Action PlayPause]
+Name=Reproducir / pausa
+Exec=sonata --toggle
+
+[Desktop Action Next]
+Name=Siguiente
+Exec=sonata --next
+
+[Desktop Action Previous]
+Name=Anterior
+Exec=sonata --prev

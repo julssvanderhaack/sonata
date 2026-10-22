@@ -1,0 +1,98 @@
+# Sonata
+
+Reproductor de música local para Linux, escrito en C++ con Qt 6, FFmpeg y PipeWire.
+Pensado para gastar poca CPU y batería en equipos modestos, y para verse bien
+junto al escritorio [Omarchy](https://omarchy.org), cuyos colores sigue.
+
+![Icono de Sonata](data/sonata.svg)
+
+## Qué hace
+
+- Reproduce cualquier formato de audio que entienda FFmpeg (MP3, FLAC, Opus, Ogg,
+  AAC/M4A, WAV, APE, WavPack, WMA…), sin cortes entre pistas con la misma frecuencia
+  de muestreo y sin remuestrear: el audio va tal cual a PipeWire.
+- **Letras**: busca un `.lrc` junto al archivo, la letra incrustada en las etiquetas
+  o la descarga de [lrclib.net](https://lrclib.net). Las sincronizadas resaltan la
+  línea que suena y se puede pulsar una línea para saltar a ella; ±0,5 s para
+  ajustar el desfase.
+- **Ecualizador** de 10 bandas con preajustes, los tuyos propios y ajuste
+  automático de volumen para no saturar.
+- **Espectro** en tiempo real.
+- **Listas** en pestañas: arrastrar y soltar, búsqueda, ordenar, quitar duplicados,
+  importar y exportar M3U.
+- Se adapta al tamaño de la ventana: lista y reproducción lado a lado, una encima de
+  otra a media pantalla, y compacta en un cuarto de pantalla.
+- Controlable desde el escritorio por **MPRIS** (teclas multimedia, `playerctl`,
+  barras de estado).
+- Una sola instancia: abrir canciones desde el explorador de archivos las añade a la
+  ventana que ya está abierta.
+- Colores del tema de Omarchy (`~/.local/state/omarchy/current/theme/colors.toml`),
+  que cambian al momento al cambiar de tema; sin Omarchy usa un tema oscuro propio.
+- Interfaz en español.
+
+## Instalar desde el zip
+
+El zip de cada [versión](https://github.com/julssvanderhaack/sonata/releases) trae
+el ejecutable ya compilado para x86-64. Está enlazado con las bibliotecas del
+sistema, así que necesitas versiones al menos tan recientes como aquellas con las
+que se compiló: **Qt 6.12, FFmpeg 9 y PipeWire 1.x**. En la práctica, una
+distribución basada en Arch al día (Arch, Omarchy, EndeavourOS, CachyOS…):
+
+```sh
+sudo pacman -S --needed qt6-base ffmpeg pipewire
+unzip sonata-1.0.0-linux-x86_64.zip
+cd sonata-1.0.0-linux-x86_64
+./install.sh            # en ~/.local (sin sudo)
+# sudo ./install.sh --system   # para todos los usuarios, en /usr/local
+```
+
+`./install.sh --uninstall` (o `sudo ./install.sh --system --uninstall`) lo quita.
+
+Para que sea el reproductor por defecto de tus archivos de música:
+
+```sh
+xdg-mime default sonata.desktop audio/mpeg audio/flac audio/ogg audio/x-vorbis+ogg audio/opus audio/mp4 audio/x-m4a audio/wav audio/x-wav
+```
+
+En otras distribuciones, o si el ejecutable se queja de alguna biblioteca, compílalo.
+
+## Compilar
+
+Necesitas un compilador con C++20, CMake ≥ 3.20, Qt 6 (Widgets, Network, DBus,
+Concurrent), FFmpeg (libavformat, libavcodec, libavutil, libswresample) y PipeWire.
+
+```sh
+# Arch:   sudo pacman -S --needed base-devel cmake qt6-base ffmpeg pipewire
+# Debian/Ubuntu: sudo apt install build-essential cmake qt6-base-dev libavformat-dev \
+#                libavcodec-dev libavutil-dev libswresample-dev libpipewire-0.3-dev
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+cmake --install build --prefix ~/.local
+```
+
+Por defecto se optimiza para el procesador de la máquina que compila
+(`-march=native`); `-DSONATA_NATIVE=OFF` genera un ejecutable para cualquier x86-64.
+
+## Atajos de teclado
+
+| Tecla | Acción |
+|---|---|
+| Espacio | Reproducir / pausa |
+| ← / → | −5 s / +5 s (con Mayús: 30 s) |
+| Ctrl + ← / → | Canción anterior / siguiente |
+| Ctrl + ↑ / ↓ | Volumen |
+| Ctrl + O / Ctrl + Mayús + O | Añadir archivos / carpeta |
+| Ctrl + F | Buscar en la lista |
+| Ctrl + T / Ctrl + W | Nueva lista / cerrar lista |
+| Ctrl + L / E / G | Letra / ecualizador / espectro |
+| Ctrl + K | Mostrar u ocultar letra, ecualizador y espectro |
+
+## Dónde guarda las cosas
+
+- Listas: `~/.local/share/sonata/playlists/`
+- Estado (volumen, ecualizador, posición): `~/.local/state/sonata/state.json`
+- Letras y carátulas descargadas: `~/.cache/sonata/`
+
+## Licencia
+
+[GPL-3.0](LICENSE).
