@@ -3,10 +3,12 @@
 #include "lyricsview.h"
 #include "playlist.h"
 #include "spectrum.h"
+#include "tagedit.h"
 #include "theme.h"
 #include "widgets.h"
 #include <QApplication>
 #include <QButtonGroup>
+#include <QClipboard>
 #include <QCloseEvent>
 #include <QCryptographicHash>
 #include <QDBusObjectPath>
@@ -26,7 +28,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMessageBox>
 #include <QProcess>
+#include <QPushButton>
 #include <QRandomGenerator>
 #include <QShortcut>
 #include <QSortFilterProxyModel>
@@ -158,7 +162,8 @@ MainWindow::MainWindow()
         if (tok != lyricsToken_) return;
         lyrics_->setLyrics(l);
         lyrics_->setStatus(l.networkError ? "No se ha podido consultar lrclib.net.\nPulsa «Buscar otra vez» en un rato."
-                                          : "No se ha encontrado la letra de esta canción");
+                                          : "No se ha encontrado la letra de esta canción.\n"
+                                            "¿Está mal etiquetada? Corrige el título o el artista con Ctrl+I.");
         lyricsSource_->setText(l.isEmpty() ? QString() : l.source + (l.synced ? "" : " · sin sincronizar"));
         lyrics_->setPosition(engine_->position(), engine_->duration());
     });
@@ -192,6 +197,14 @@ MainWindow::MainWindow()
         tabs_->setCurrentIndex(lists_.indexOf(playingList_));
         const int r = playingList_->rowOf(playingUid_);
         if (r >= 0) table_->scrollTo(proxy_->mapFromSource(playingList_->index(r, 0)), QAbstractItemView::PositionAtCenter);
+    });
+    sc(Qt::CTRL | Qt::Key_I, [this] {   // the selected songs, else the one playing
+        Playlist *pl = currentList();
+        QList<int> rows;
+        if (table_->hasFocus() && pl)
+            for (const QModelIndex &i : table_->selectionModel()->selectedRows()) rows << proxy_->mapToSource(i).row();
+        if (rows.isEmpty()) editPlayingTags();
+        else editTags(pl, rows);
     });
     sc(Qt::CTRL | Qt::Key_Q, [this] { close(); });
 
@@ -405,6 +418,16 @@ QWidget *MainWindow::buildNowPane()
     format_->setProperty("role", "caption");
     for (QLabel *l : {title_, artist_, album_, format_}) l->setTextInteractionFlags(Qt::TextSelectableByMouse);
     title_->installEventFilter(this);   // re-elides on width changes
+    for (QLabel *l : {title_, artist_, album_}) {
+        l->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(l, &QWidget::customContextMenuRequested, this, [this, l](const QPoint &p) {
+            if (!hasCurrent()) return;
+            QMenu m(this);
+            m.addAction("Editar etiquetas…", this, &MainWindow::editPlayingTags);
+            if (l->hasSelectedText()) m.addAction("Copiar", this, [l] { QApplication::clipboard()->setText(l->selectedText()); });
+            m.exec(l->mapToGlobal(p));
+        });
+    }
     info->addStretch();
     info->addWidget(title_);
     info->addWidget(artist_);
@@ -464,6 +487,7 @@ QWidget *MainWindow::buildNowPane()
     moreMenu->addAction("Adelantar la letra 0,5 s", this, [this] { lyrics_->setOffset(lyrics_->offset() + 0.5); });
     moreMenu->addAction("Retrasar la letra 0,5 s", this, [this] { lyrics_->setOffset(lyrics_->offset() - 0.5); });
     moreMenu->addAction("Buscar otra vez", refetch, &QToolButton::click);
+    moreMenu->addAction("Corregir título y artista…", this, &MainWindow::editPlayingTags);
     lyricsMore_->setMenu(moreMenu);
     lyricsMore_->setPopupMode(QToolButton::InstantPopup);
     lyricsMore_->setStyleSheet("QToolButton::menu-indicator { image: none; width: 0; }");
@@ -972,6 +996,8 @@ void MainWindow::showContextMenu(const QPoint &pos)
         auto *nl = addList(new Playlist(QString("Lista %1").arg(lists_.size() + 1), this), false);
         nl->insertPaths(paths);
     });
+    m.addAction(rows.size() == 1 ? QString("Editar etiquetas…") : QString("Editar etiquetas (%1)…").arg(rows.size()),
+                this, [=, this] { editTags(pl, rows); });
     m.addSeparator();
     m.addAction(QString("Quitar de la lista (%1)").arg(rows.size()), this, [=] { pl->removeRowsList(rows); });
     m.exec(table_->viewport()->mapToGlobal(pos));
@@ -1118,18 +1144,23 @@ void MainWindow::planNext()
     engine_->setNext(it->info.path, tok);
 }
 
-void MainWindow::showTrack(const Item *it)
+void MainWindow::showTags(const TrackInfo &t)
 {
-    const TrackInfo &t = it->info;
     setTitleText(t.displayTitle());
     artist_->setText(t.displayArtist().isEmpty() ? "Artista desconocido" : t.displayArtist());
     QString alb = t.album;
     if (!t.date.isEmpty()) alb += alb.isEmpty() ? t.date : QString("  ·  %1").arg(t.date);
     album_->setText(alb);
     album_->setVisible(!alb.isEmpty());
-        fitCover();   // the new text sets how small the pane may get
-    format_->setText(engine_->formatInfo());
+    fitCover();   // the new text sets how small the pane may get
     setWindowTitle(t.displayArtist().isEmpty() ? t.displayTitle() : t.displayTitle() + " — " + t.displayArtist());
+}
+
+void MainWindow::showTrack(const Item *it)
+{
+    const TrackInfo &t = it->info;
+    showTags(t);
+    format_->setText(engine_->formatInfo());
     total_->setText(formatTime(t.duration));
     seek_->setRange(t.duration > 0 ? t.duration : 1);
     seek_->setValue(0);
@@ -1173,6 +1204,81 @@ void MainWindow::showTrack(const Item *it)
             img.scaled(512, 512, Qt::KeepAspectRatio, Qt::SmoothTransformation).save(r.art, "JPG", 88);
         }
         return r;
+    }));
+}
+
+// ─────────────────────────── tag editing ───────────────────────────
+
+void MainWindow::editPlayingTags()
+{
+    if (!hasCurrent()) return;
+    editTags(playingList_, {playingList_->rowOf(playingUid_)});
+}
+
+void MainWindow::editTags(Playlist *pl, const QList<int> &rows)
+{
+    QVector<TrackInfo> tracks;
+    for (int r : rows)
+        if (r >= 0 && r < pl->count() && pl->at(r).info.scanned) tracks << pl->at(r).info;
+    if (tracks.isEmpty()) return;
+    TagDialog d(tracks, this);
+    if (d.exec() != QDialog::Accepted) return;
+    const TagChanges c = d.changes();
+    if (c.isEmpty()) return;
+
+    QStringList paths, failed;
+    QString why;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    for (const TrackInfo &t : tracks) {
+        paths << t.path;
+        QString err;
+        if (writeTags(t.path, c, &err)) {
+            dropTagOverride(t.path, c.keys());
+        } else {
+            failed << t.path;
+            if (why.isEmpty()) why = err;
+        }
+    }
+    QApplication::restoreOverrideCursor();
+    if (!failed.isEmpty()) {
+        const QString what = failed.size() == 1 ? QString("«%1»").arg(QFileInfo(failed.front()).fileName())
+                                                : QString("%1 archivos").arg(failed.size());
+        QMessageBox box(QMessageBox::Warning, "Editar etiquetas",
+                        QString("No se han podido guardar las etiquetas en %1 (%2).").arg(what, why), QMessageBox::NoButton, this);
+        box.setInformativeText("Puedes guardar la corrección solo en Sonata: el archivo no cambia, pero la lista, "
+                               "MPRIS y la búsqueda de letras usarán los datos corregidos.");
+        QPushButton *keep = box.addButton("Guardar solo en Sonata", QMessageBox::AcceptRole);
+        box.addButton("Descartar", QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == keep)
+            for (const QString &p : failed) setTagOverride(p, c);
+    }
+
+    // read back what the files (and overrides) say now, then refresh every list;
+    // the song playing searches its lyrics again with the corrected tags
+    auto *w = new QFutureWatcher<QVector<TrackInfo>>(this);
+    connect(w, &QFutureWatcher<QVector<TrackInfo>>::finished, this, [this, w] {
+        w->deleteLater();
+        const QVector<TrackInfo> infos = w->result();
+        const Item *cur = hasCurrent() ? playingList_->find(playingUid_) : nullptr;
+        const QString curPath = cur ? cur->info.path : QString();
+        for (const TrackInfo &t : infos) {
+            for (Playlist *l : lists_) l->updateInfo(t.path, t);
+            if (t.path != curPath) continue;
+            showTags(t);
+            emit metadataChanged();
+            lyricsToken_ = nextToken_++;
+            lyrics_->setLyrics({});
+            lyrics_->setStatus("");
+            lyricsSource_->clear();
+            fetcher_->request(t, lyricsToken_, true);
+        }
+        updateStatus();
+    });
+    w->setFuture(QtConcurrent::run([paths] {
+        QVector<TrackInfo> out;
+        for (const QString &p : paths) out << readTrackInfo(p);
+        return out;
     }));
 }
 

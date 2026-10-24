@@ -88,6 +88,9 @@ private:
     void onTrackStarted(quint64 token);
     void onFailed(quint64 token, const QString &path, const QString &msg);
     void showTrack(const Item *it);
+    void showTags(const TrackInfo &t);
+    void editTags(Playlist *pl, const QList<int> &rows);
+    void editPlayingTags();
     void updatePlayButton();
     void updateVolumeIcon();
     void updateStatus();

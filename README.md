@@ -26,6 +26,13 @@ letras de las capturas son inventadas, y el tema es Cobalt2 de Omarchy.*
   o la descarga de [lrclib.net](https://lrclib.net). Las sincronizadas resaltan la
   línea que suena y se puede pulsar una línea para saltar a ella; ±0,5 s para
   ajustar el desfase.
+- **Editar etiquetas** (título, artista, álbum, artista del álbum, género, año,
+  pista y disco) para corregir canciones mal etiquetadas: clic derecho en la lista
+  o en el título de lo que suena, o Ctrl + I. Se guardan en el propio archivo con
+  TagLib; con varias canciones seleccionadas solo cambian los campos que edites.
+  Al corregir la canción que suena, la letra se vuelve a buscar con los datos
+  nuevos. Si el archivo no se puede escribir, la corrección puede quedarse solo en
+  Sonata.
 - **Ecualizador** de 10 bandas con preajustes, los tuyos propios y ajuste
   automático de volumen para no saturar.
 - **Espectro** en tiempo real.
@@ -46,11 +53,11 @@ letras de las capturas son inventadas, y el tema es Cobalt2 de Omarchy.*
 El zip de cada [versión](https://github.com/julssvanderhaack/sonata/releases) trae
 el ejecutable ya compilado para x86-64. Está enlazado con las bibliotecas del
 sistema, así que necesitas versiones al menos tan recientes como aquellas con las
-que se compiló: **Qt 6.12, FFmpeg 9 y PipeWire 1.x**. En la práctica, una
+que se compiló: **Qt 6.12, FFmpeg 9, TagLib 2 y PipeWire 1.x**. En la práctica, una
 distribución basada en Arch al día (Arch, Omarchy, EndeavourOS, CachyOS…):
 
 ```sh
-sudo pacman -S --needed qt6-base ffmpeg pipewire
+sudo pacman -S --needed qt6-base ffmpeg taglib pipewire
 unzip sonata-1.0.0-linux-x86_64.zip
 cd sonata-1.0.0-linux-x86_64
 ./install.sh            # en ~/.local (sin sudo)
@@ -70,12 +77,13 @@ En otras distribuciones, o si el ejecutable se queja de alguna biblioteca, comp�
 ## Compilar
 
 Necesitas un compilador con C++20, CMake ≥ 3.20, Qt 6 (Widgets, Network, DBus,
-Concurrent), FFmpeg (libavformat, libavcodec, libavutil, libswresample) y PipeWire.
+Concurrent), FFmpeg (libavformat, libavcodec, libavutil, libswresample), TagLib ≥ 2
+y PipeWire.
 
 ```sh
-# Arch:   sudo pacman -S --needed base-devel cmake qt6-base ffmpeg pipewire
+# Arch:   sudo pacman -S --needed base-devel cmake qt6-base ffmpeg taglib pipewire
 # Debian/Ubuntu: sudo apt install build-essential cmake qt6-base-dev libavformat-dev \
-#                libavcodec-dev libavutil-dev libswresample-dev libpipewire-0.3-dev
+#                libavcodec-dev libavutil-dev libswresample-dev libtag-dev libpipewire-0.3-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 cmake --install build --prefix ~/.local
@@ -97,12 +105,14 @@ Por defecto se optimiza para el procesador de la máquina que compila
 | Ctrl + T / Ctrl + W | Nueva lista / cerrar lista |
 | Ctrl + L / E / G | Letra / ecualizador / espectro |
 | Ctrl + K | Mostrar u ocultar letra, ecualizador y espectro |
+| Ctrl + I | Editar etiquetas (de las seleccionadas o de la que suena) |
 
 ## Dónde guarda las cosas
 
 - Listas: `~/.local/share/sonata/playlists/`
 - Estado (volumen, ecualizador, posición): `~/.local/state/sonata/state.json`
 - Letras y carátulas descargadas: `~/.cache/sonata/`
+- Correcciones de etiquetas guardadas solo en Sonata: `~/.local/share/sonata/tags.json`
 
 ## Licencia
 

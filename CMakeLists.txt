@@ -22,6 +22,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Network DBus Concurrent)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswresample)
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
+pkg_check_modules(TAGLIB REQUIRED IMPORTED_TARGET taglib>=2.0)
 
 add_executable(sonata
   src/main.cpp
@@ -32,6 +33,7 @@ add_executable(sonata
   src/engine.h src/engine.cpp
   src/meta.h src/meta.cpp
   src/lyrics.h src/lyrics.cpp
+  src/tagedit.h src/tagedit.cpp
   src/lyricsview.h src/lyricsview.cpp
   src/playlist.h src/playlist.cpp
   src/eqpanel.h src/eqpanel.cpp
@@ -42,7 +44,7 @@ add_executable(sonata
   data/sonata.qrc
 )
 target_link_libraries(sonata PRIVATE Qt6::Widgets Qt6::Network Qt6::DBus Qt6::Concurrent
-  PkgConfig::FFMPEG PkgConfig::PIPEWIRE)
+  PkgConfig::FFMPEG PkgConfig::PIPEWIRE PkgConfig::TAGLIB)
 install(TARGETS sonata RUNTIME DESTINATION bin)
 install(FILES data/sonata.desktop DESTINATION share/applications)
 install(FILES data/sonata.svg DESTINATION share/icons/hicolor/scalable/apps)
