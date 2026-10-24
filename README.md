@@ -35,7 +35,8 @@ letras de las capturas son inventadas, y el tema es Cobalt2 de Omarchy.*
   Sonata.
 - **Ecualizador** de 10 bandas con preajustes, los tuyos propios y ajuste
   automático de volumen para no saturar.
-- **Espectro** en tiempo real.
+- **Espectro** en tiempo real: una curva continua de 20 Hz hasta la frecuencia de
+  Nyquist de la canción (la mitad de su frecuencia de muestreo).
 - **Listas** en pestañas: arrastrar y soltar, búsqueda, ordenar, quitar duplicados,
   importar y exportar M3U.
 - Se adapta al tamaño de la ventana: lista y reproducción lado a lado, una encima de

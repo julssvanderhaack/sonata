@@ -1,6 +1,7 @@
-// Live spectrum: a 4096-point FFT of what is playing right now, drawn as bars
-// on a logarithmic frequency axis with falling peak caps. Runs at ~30 fps and
-// only while it is on screen.
+// Live spectrum: a 4096-point FFT of what is playing right now, drawn as a
+// smooth filled curve on a logarithmic frequency axis that runs up to the
+// track's Nyquist frequency (half its sample rate), with a slowly falling peak
+// line. Runs at ~30 fps and only while it is on screen.
 #pragma once
 #include <QElapsedTimer>
 #include <QPixmap>
@@ -23,9 +24,9 @@ protected:
 
 private:
     void step();
-    void analyse(int rate, int bands);
-    QRect barArea() const;
-    void paintBackground();   // grid + labels, cached: only the bars are drawn each frame
+    void analyse(int rate, int points);
+    QRect plotArea() const;
+    void paintBackground();   // grid + labels, cached: only the curve is drawn each frame
 
     Engine *engine_;
     QTimer timer_;
