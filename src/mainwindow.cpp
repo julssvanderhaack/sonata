@@ -162,8 +162,7 @@ MainWindow::MainWindow()
         if (tok != lyricsToken_) return;
         lyrics_->setLyrics(l);
         lyrics_->setStatus(l.networkError ? "No se ha podido consultar lrclib.net.\nPulsa «Buscar otra vez» en un rato."
-                                          : "No se ha encontrado la letra de esta canción.\n"
-                                            "¿Está mal etiquetada? Corrige el título o el artista con Ctrl+I.");
+                                          : "No se ha encontrado la letra de esta canción");
         lyricsSource_->setText(l.isEmpty() ? QString() : l.source + (l.synced ? "" : " · sin sincronizar"));
         lyrics_->setPosition(engine_->position(), engine_->duration());
     });
