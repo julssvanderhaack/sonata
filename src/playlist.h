@@ -32,6 +32,7 @@ public:
     void clear();
     void setFailed(quint64 uid, bool f);
     void setPlaying(quint64 uid);
+    void updateInfo(const QString &path, const TrackInfo &info);   // tags edited: every row with that file
     void sortBy(int col);
     void removeDuplicates();
     double totalDuration() const;
