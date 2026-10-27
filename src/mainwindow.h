@@ -7,6 +7,7 @@
 #include <QSet>
 
 class QLabel;
+class QMenu;
 class QLineEdit;
 class QMimeData;
 class QScrollArea;
@@ -84,8 +85,20 @@ private:
     Playlist *addList(Playlist *pl, bool select);
     void closeList(int idx);
     void renameList(int idx);
-    void playItem(Playlist *pl, quint64 uid, double start = 0, bool paused = false);
+    struct Entry {
+        QPointer<Playlist> list;
+        quint64 uid = 0;
+        bool operator==(const Entry &o) const;
+    };
+    void playItem(Playlist *pl, quint64 uid, double start = 0, bool paused = false, bool fromQueue = false);
     void planNext();
+    Entry nextTrack(bool manual);
+    void enqueue(Playlist *pl, const QList<int> &rows, bool front);
+    void dequeue(Playlist *pl, const QList<int> &rows);
+    void queueChanged();
+    void setSleep(int minutes);   // 0 off, -1 at the end of this song
+    void cancelSleepFade();
+    void addPlaybackMenu(QMenu &m);
     quint64 pickNext(Playlist *pl, quint64 from, bool manual);
     void onTrackStarted(quint64 token);
     void onFailed(quint64 token, const QString &path, const QString &msg);
@@ -146,6 +159,15 @@ private:
     Repeat repeat_ = RepeatOff;
     QVector<quint64> history_;            // for "previous" in shuffle mode
     QSet<quint64> shufflePlayed_;
+    QVector<Entry> queue_;        // "play next" / "add to queue", before the list goes on
+    Entry returnTo_;              // where the list goes on once the queue is played
+    QSet<quint64> queueTokens_;   // engine tokens of queued songs
+    QTimer *sleepTimer_, *sleepFade_, *sleepTick_;
+    qint64 sleepAt_ = 0;          // msecs since epoch; 0 = no timer
+    bool stopAfterTrack_ = false;
+    int fadeStep_ = 0;
+    float fadeFrom_ = 1;
+    GlyphButton *sleepBtn_;
     quint64 shufflePlanned_ = 0;
     qint64 lastRefresh_ = 0;   // msecs: tags re-checked when the window comes back
     double resumePos_ = -1;

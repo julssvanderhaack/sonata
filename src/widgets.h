@@ -26,6 +26,8 @@ inline const QString Search = QString::fromUcs4(U"\U000F0349");
 inline const QString Eq = QString::fromUcs4(U"\U000F00EC");
 inline const QString Lyrics = QString::fromUcs4(U"\U000F036C");
 inline const QString Sidebar = QString::fromUcs4(U"\U000F0CB8");
+inline const QString Sleep = QString::fromUcs4(U"\U000F04B2");
+
 }
 
 QFont iconFont(int px);

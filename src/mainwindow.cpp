@@ -117,6 +117,36 @@ MainWindow::MainWindow()
     v->addWidget(buildTransport());
     setCentralWidget(central);
 
+    sleepTimer_ = new QTimer(this);
+    sleepTimer_->setSingleShot(true);
+    sleepFade_ = new QTimer(this);
+    sleepFade_->setInterval(200);   // 8 s fade, then pause
+    sleepTick_ = new QTimer(this);
+    sleepTick_->setInterval(30000);   // the "stops in N min" caption
+    connect(sleepTick_, &QTimer::timeout, this, &MainWindow::updateStatus);
+    connect(sleepTimer_, &QTimer::timeout, this, [this] {
+        sleepAt_ = 0;
+        sleepTick_->stop();
+        if (engine_->state() != Engine::Playing) {
+            setSleep(0);
+            return;
+        }
+        fadeFrom_ = engine_->volume();
+        fadeStep_ = 0;
+        sleepFade_->start();
+    });
+    connect(sleepFade_, &QTimer::timeout, this, [this] {
+        constexpr int steps = 40;
+        if (++fadeStep_ < steps) {
+            engine_->setVolume(fadeFrom_ * float(steps - fadeStep_) / steps);
+            return;
+        }
+        sleepFade_->stop();
+        engine_->setPaused(true);
+        engine_->setVolume(fadeFrom_);   // back to normal for the morning
+        setSleep(0);
+    });
+
     saveTimer_ = new QTimer(this);
     saveTimer_->setSingleShot(true);
     saveTimer_->setInterval(1500);
@@ -134,6 +164,7 @@ MainWindow::MainWindow()
         elapsed_->setText("0:00");
         lyrics_->setPosition(0, 0);
         resumePos_ = -1;
+        if (stopAfterTrack_) setSleep(0);
         emit metadataChanged();
     });
     connect(engine_, &Engine::tick, this, [this](double pos) {
@@ -387,6 +418,8 @@ QWidget *MainWindow::buildPlaylistPane()
         m.addAction("Renombrar lista…", this, [this] { renameList(tabs_->currentIndex()); });
         m.addAction("Vaciar lista", this, [pl] { pl->clear(); });
         m.addAction("Cerrar lista", this, [this] { closeList(tabs_->currentIndex()); });
+        m.addSeparator();
+        addPlaybackMenu(m);
         m.exec(more->mapToGlobal(QPoint(0, more->height())));
     });
     return pane;
@@ -579,6 +612,10 @@ QWidget *MainWindow::buildTransport()
     extrasBtn_->setCheckable(true);
     extrasBtn_->setChecked(true);
     auto *sideBtn = new GlyphButton(Glyph::Sidebar, 18, "Mostrar / ocultar la lista");
+    sleepBtn_ = new GlyphButton(Glyph::Sleep, 18, "Temporizador para dormir");
+    sleepBtn_->setCheckable(true);   // drawn lit: a timer is running
+    sleepBtn_->setChecked(true);
+    sleepBtn_->hide();   // only while a timer is set
     sideBtn->setCheckable(true);
     sideBtn->setChecked(true);
 
@@ -597,6 +634,7 @@ QWidget *MainWindow::buildTransport()
     volBtn_->installEventFilter(this);
     h->addWidget(vol_);
     h->addSpacing(4);
+    h->addWidget(sleepBtn_);
     h->addWidget(extrasBtn_);
     h->addWidget(sideBtn);
 
@@ -615,6 +653,12 @@ QWidget *MainWindow::buildTransport()
         } else setVolume(preMute_ > 0 ? preMute_ : 0.8);
     });
     connect(extrasBtn_, &QToolButton::clicked, this, [this](bool on) { setExtrasVisible(on); });
+    connect(sleepBtn_, &QToolButton::clicked, this, [this] {
+        sleepBtn_->setChecked(true);
+        QMenu m(this);
+        addPlaybackMenu(m);
+        m.exec(sleepBtn_->mapToGlobal(QPoint(0, 0)) - QPoint(0, m.sizeHint().height()));
+    });
     connect(sideBtn, &QToolButton::toggled, this, [this](bool on) { listPane_->setVisible(on); });
     return bar;
 }
@@ -972,14 +1016,10 @@ void MainWindow::showContextMenu(const QPoint &pos)
     if (rows.isEmpty()) return;
     QMenu m(this);
     m.addAction("Reproducir", this, [=, this] { playItem(pl, pl->at(rows.front()).uid); });
-    if (playingList_ == pl && playingUid_)
-        m.addAction("Reproducir a continuación", this, [=, this] {
-            QVector<Item> moving;
-            QStringList paths;
-            for (int r : rows) paths << pl->at(r).info.path;
-            pl->removeRowsList(rows);
-            pl->insertPaths(paths, pl->rowOf(playingUid_) + 1);
-        });
+    m.addAction("Reproducir a continuación", this, [=, this] { enqueue(pl, rows, true); });
+    m.addAction("Añadir a la cola", this, [=, this] { enqueue(pl, rows, false); });
+    if (std::any_of(rows.begin(), rows.end(), [&](int r) { return queue_.contains(Entry{pl, pl->at(r).uid}); }))
+        m.addAction("Quitar de la cola", this, [=, this] { dequeue(pl, rows); });
     m.addAction("Abrir carpeta", this, [=] {
         const QString path = pl->at(rows.front()).info.path;
         if (!QProcess::startDetached("nautilus", {"--select", path}))
@@ -1017,6 +1057,12 @@ void MainWindow::updateStatus()
     QString s = n == 1 ? "1 canción" : QString("%1 canciones").arg(n);
     if (n) s += " · " + humanDuration(pl->totalDuration());
     if (!search_->text().trimmed().isEmpty()) s = QString("%1 de %2").arg(proxy_->rowCount()).arg(s);
+    if (!queue_.isEmpty()) s += QString(" · %1 en cola").arg(queue_.size());
+    QString sleep;
+    if (stopAfterTrack_) sleep = "se para al acabar esta canción";
+    else if (sleepAt_) sleep = QString("se para en %1 min").arg(std::max<qint64>(1, (sleepAt_ - QDateTime::currentMSecsSinceEpoch() + 59999) / 60000));
+    if (!sleep.isEmpty()) s += " · " + sleep;
+    sleepBtn_->setToolTip(sleep.isEmpty() ? "Temporizador para dormir" : "Temporizador: " + sleep);
     status_->setText(s);
 }
 
@@ -1027,11 +1073,19 @@ bool MainWindow::hasCurrent() const
     return playingList_ && playingList_->find(playingUid_);
 }
 
-void MainWindow::playItem(Playlist *pl, quint64 uid, double start, bool paused)
+void MainWindow::playItem(Playlist *pl, quint64 uid, double start, bool paused, bool fromQueue)
 {
     if (!pl) return;
     const Item *it = pl->find(uid);
     if (!it) return;
+    if (fromQueue) {
+        // remember where the list was, to go on from there once the queue is done
+        if (!returnTo_.list && playingList_) returnTo_ = {playingList_, playingUid_};
+        if (!queue_.isEmpty() && queue_.front() == Entry{pl, uid}) queue_.removeFirst();
+        queueChanged();
+    } else {
+        returnTo_ = {};   // picked by hand: the list goes on from here
+    }
     const quint64 tok = nextToken_++;
     tokens_[tok] = {pl, uid};
     lastStartToken_ = tok;
@@ -1063,6 +1117,13 @@ void MainWindow::onTrackStarted(quint64 token)
         // started by playItem(); just refresh the format line
         format_->setText(engine_->formatInfo());
         return;
+    }
+    if (queueTokens_.remove(token)) {
+        if (!returnTo_.list && playingList_) returnTo_ = {playingList_, playingUid_};
+        if (!queue_.isEmpty() && queue_.front() == Entry{pl, uid}) queue_.removeFirst();
+        queueChanged();
+    } else {
+        returnTo_ = {};
     }
     if (playingList_ && playingList_ != pl) playingList_->setPlaying(0);
     playingList_ = pl;
@@ -1132,21 +1193,117 @@ quint64 MainWindow::pickNext(Playlist *pl, quint64 from, bool manual)
     return 0;
 }
 
+bool MainWindow::Entry::operator==(const Entry &o) const
+{
+    return list.data() == o.list.data() && uid == o.uid;
+}
+
+// What plays after the current song: the queue first, then the list, from
+// where it was when the queue started.
+MainWindow::Entry MainWindow::nextTrack(bool manual)
+{
+    if (stopAfterTrack_ && !manual) return {};
+    while (!queue_.isEmpty() && !(queue_.front().list && queue_.front().list->find(queue_.front().uid))) queue_.removeFirst();
+    if (!queue_.isEmpty()) return queue_.front();
+    Entry from{playingList_, playingUid_};
+    if (returnTo_.list && returnTo_.list->find(returnTo_.uid)) from = returnTo_;
+    if (!from.list) return {};
+    if (const quint64 n = pickNext(from.list, from.uid, manual)) return {from.list, n};
+    return {};
+}
+
 void MainWindow::planNext()
 {
-    if (!playingList_) {
-        engine_->setNext({}, 0);
-        return;
-    }
-    const quint64 n = pickNext(playingList_, playingUid_, false);
-    const Item *it = n ? playingList_->find(n) : nullptr;
+    const Entry n = nextTrack(false);
+    const Item *it = n.list ? n.list->find(n.uid) : nullptr;
     if (!it) {
         engine_->setNext({}, 0);
         return;
     }
     const quint64 tok = nextToken_++;
-    tokens_[tok] = {playingList_, n};
+    tokens_[tok] = {n.list, n.uid};
+    if (!queue_.isEmpty() && queue_.front() == n) queueTokens_.insert(tok);
     engine_->setNext(it->info.path, tok);
+}
+
+// ─────────────────────────── queue ───────────────────────────
+
+void MainWindow::enqueue(Playlist *pl, const QList<int> &rows, bool front)
+{
+    QVector<Entry> add;
+    for (int r : rows)
+        if (r >= 0 && r < pl->count()) add.push_back({pl, pl->at(r).uid});
+    if (add.isEmpty()) return;
+    if (!hasCurrent() || engine_->state() == Engine::Stopped) {
+        // nothing playing: the first one plays now, the rest wait
+        const Entry first = add.takeFirst();
+        queue_ = add + queue_;
+        playItem(first.list, first.uid);
+        queueChanged();
+        return;
+    }
+    if (front) queue_ = add + queue_;
+    else queue_ += add;
+    queueChanged();
+}
+
+void MainWindow::dequeue(Playlist *pl, const QList<int> &rows)
+{
+    QSet<quint64> uids;
+    for (int r : rows)
+        if (r >= 0 && r < pl->count()) uids.insert(pl->at(r).uid);
+    queue_.removeIf([&](const Entry &e) { return e.list == pl && uids.contains(e.uid); });
+    queueChanged();
+}
+
+void MainWindow::queueChanged()
+{
+    queue_.removeIf([](const Entry &e) { return !e.list || !e.list->find(e.uid); });
+    QHash<Playlist *, QHash<quint64, int>> marks;
+    for (int i = 0; i < queue_.size(); ++i) marks[queue_[i].list][queue_[i].uid] = i + 1;
+    for (Playlist *l : allLists()) l->setQueueMarks(marks.value(l));
+    planNext();
+    updateStatus();
+}
+
+// ─────────────────────────── sleep timer ───────────────────────────
+
+void MainWindow::setSleep(int minutes)
+{
+    cancelSleepFade();
+    stopAfterTrack_ = minutes < 0;
+    sleepAt_ = minutes > 0 ? QDateTime::currentMSecsSinceEpoch() + qint64(minutes) * 60000 : 0;
+    if (minutes > 0) sleepTimer_->start(minutes * 60000);
+    else sleepTimer_->stop();
+    if (sleepAt_) sleepTick_->start();
+    else sleepTick_->stop();
+    sleepBtn_->setVisible(sleepAt_ || stopAfterTrack_);
+    planNext();   // "at the end of this song" = nothing queued after it
+    updateStatus();
+}
+
+void MainWindow::cancelSleepFade()
+{
+    if (!sleepFade_->isActive()) return;
+    sleepFade_->stop();
+    engine_->setVolume(fadeFrom_);
+}
+
+void MainWindow::addPlaybackMenu(QMenu &m)
+{
+    QMenu *sleep = m.addMenu("Temporizador para dormir");
+    for (int min : {15, 30, 45, 60, 90})
+        sleep->addAction(QString("Parar dentro de %1 min").arg(min), this, [this, min] { setSleep(min); });
+    sleep->addAction("Parar al acabar esta canción", this, [this] { setSleep(-1); });
+    if (sleepAt_ || stopAfterTrack_) {
+        sleep->addSeparator();
+        sleep->addAction("Desactivar", this, [this] { setSleep(0); });
+    }
+    if (!queue_.isEmpty())
+        m.addAction(QString("Vaciar la cola (%1)").arg(queue_.size()), this, [this] {
+            queue_.clear();
+            queueChanged();
+        });
 }
 
 void MainWindow::showTags(const TrackInfo &t)
@@ -1294,6 +1451,7 @@ void MainWindow::editTags(Playlist *pl, const QList<int> &rows)
 
 void MainWindow::play()
 {
+    cancelSleepFade();
     if (engine_->state() == Engine::Paused) {
         engine_->setPaused(false);
         return;
@@ -1311,6 +1469,7 @@ void MainWindow::play()
 
 void MainWindow::pause()
 {
+    cancelSleepFade();
     if (engine_->state() == Engine::Playing) engine_->setPaused(true);
 }
 
@@ -1322,6 +1481,7 @@ void MainWindow::playPause()
 
 void MainWindow::stop()
 {
+    cancelSleepFade();
     resumePos_ = -1;
     engine_->stop();
     seek_->setValue(0);
@@ -1334,7 +1494,9 @@ void MainWindow::next()
         play();
         return;
     }
-    if (quint64 n = pickNext(playingList_, playingUid_, true)) playItem(playingList_, n);
+    const bool queued = !queue_.isEmpty();
+    const Entry n = nextTrack(true);
+    if (n.list) playItem(n.list, n.uid, 0, false, queued && n == queue_.front());
 }
 
 void MainWindow::prev()
@@ -1371,6 +1533,7 @@ void MainWindow::seekTo(double sec)
 void MainWindow::setVolume(double v)
 {
     v = std::clamp(v, 0.0, 1.0);
+    if (sleepFade_->isActive()) sleepFade_->stop();   // the user takes over the volume
     engine_->setVolume(float(v));
     vol_->setValue(v);
     updateVolumeIcon();

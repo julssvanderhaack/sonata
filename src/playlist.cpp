@@ -141,6 +141,13 @@ void Playlist::setFailed(quint64 uid, bool f)
     emit dataChanged(index(r, 0), index(r, ColCount - 1));
 }
 
+void Playlist::setQueueMarks(const QHash<quint64, int> &marks)
+{
+    if (marks == queued_) return;
+    queued_ = marks;
+    if (!items_.isEmpty()) emit dataChanged(index(0, ColState), index(items_.size() - 1, ColState));
+}
+
 void Playlist::setPlaying(quint64 uid)
 {
     const int old = rowOf(playing_);
@@ -263,7 +270,10 @@ QVariant Playlist::data(const QModelIndex &idx, int role) const
     switch (role) {
     case Qt::DisplayRole:
         switch (idx.column()) {
-        case ColState: return playing ? Glyph::Play : QVariant();
+        case ColState:
+            if (playing) return Glyph::Play;
+            if (const int q = queued_.value(it.uid)) return QString::number(q);
+            return {};
         case ColNo: return t.trackNo > 0 ? QVariant(t.trackNo) : QVariant(idx.row() + 1);
         case ColTitle: return t.displayTitle();
         case ColArtist: return t.displayArtist();
@@ -274,11 +284,17 @@ QVariant Playlist::data(const QModelIndex &idx, int role) const
     case Qt::ToolTipRole: return t.path;
     case Qt::ForegroundRole:
         if (it.failed) return QColor("#e06c75");
-        if (playing) return th.accent;
+        if (playing || (idx.column() == ColState && queued_.contains(it.uid))) return th.accent;
         if (idx.column() == ColNo || idx.column() == ColTime || idx.column() == ColAlbum) return th.fgDim;
         break;
     case Qt::FontRole:
-        if (idx.column() == ColState) return iconFont(12);
+        if (idx.column() == ColState) {
+            if (playing) return iconFont(12);
+            QFont f;
+            f.setPixelSize(10);
+            f.setBold(true);
+            return f;
+        }
         if (playing && idx.column() == ColTitle) {
             QFont f;
             f.setPixelSize(12);   // the list's font-size in theme.cpp
