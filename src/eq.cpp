@@ -3,6 +3,7 @@
 #include <cmath>
 #include <complex>
 #include <cstring>
+#include <utility>
 
 bool EqSettings::flat() const
 {
@@ -101,28 +102,88 @@ void Dsp::rebuild()
 
 static bool identity(const BiquadCoef &k) { return k.b0 == 1 && k.b1 == k.a1 && k.b2 == k.a2; }
 
+// All the active bands of every channel in one pass over the buffer. Each
+// filter's feedback is a chain of dependent multiplies; running band after
+// band, channel after channel, the CPU waits on one chain at a time. Side by
+// side (state in registers, channels and bands interleaved) it works on
+// several at once. Stereo goes further: both channels in one vector register
+// and the band count fixed at compile time, so the state never leaves registers.
+static void runBands(float *buf, unsigned frames, int ch, const BiquadCoef *k, int nb, double (*s)[kMaxChannels][2])
+{
+    for (unsigned i = 0; i < frames; ++i, buf += ch)
+        for (int c = 0; c < ch; ++c) {
+            double x = buf[c];
+            for (int b = 0; b < nb; ++b) {
+                double *z = s[b][c];
+                const double y = k[b].b0 * x + z[0];
+                z[0] = k[b].b1 * x - k[b].a1 * y + z[1];
+                z[1] = k[b].b2 * x - k[b].a2 * y;
+                x = y;
+            }
+            buf[c] = float(x);
+        }
+}
+
+typedef double Stereo __attribute__((vector_size(16)));
+
+template <int NB>
+static void runStereo(float *buf, unsigned frames, const BiquadCoef *k, double (*s)[kMaxChannels][2])
+{
+    Stereo b0[NB], b1[NB], b2[NB], a1[NB], a2[NB], z1[NB], z2[NB];
+    for (int b = 0; b < NB; ++b) {
+        b0[b] = Stereo{k[b].b0, k[b].b0};
+        b1[b] = Stereo{k[b].b1, k[b].b1};
+        b2[b] = Stereo{k[b].b2, k[b].b2};
+        a1[b] = Stereo{k[b].a1, k[b].a1};
+        a2[b] = Stereo{k[b].a2, k[b].a2};
+        z1[b] = Stereo{s[b][0][0], s[b][1][0]};
+        z2[b] = Stereo{s[b][0][1], s[b][1][1]};
+    }
+    for (unsigned i = 0; i < frames; ++i, buf += 2) {
+        Stereo x = {buf[0], buf[1]};
+        for (int b = 0; b < NB; ++b) {
+            const Stereo y = b0[b] * x + z1[b];
+            z1[b] = b1[b] * x - a1[b] * y + z2[b];
+            z2[b] = b2[b] * x - a2[b] * y;
+            x = y;
+        }
+        buf[0] = float(x[0]);
+        buf[1] = float(x[1]);
+    }
+    for (int b = 0; b < NB; ++b)
+        for (int c = 0; c < 2; ++c) {
+            s[b][c][0] = z1[b][c];
+            s[b][c][1] = z2[b][c];
+        }
+}
+
+template <int... NB>
+static void dispatchStereo(int nb, float *buf, unsigned frames, const BiquadCoef *k, double (*s)[kMaxChannels][2],
+                           std::integer_sequence<int, NB...>)
+{
+    ((nb == NB + 1 ? runStereo<NB + 1>(buf, frames, k, s) : void()), ...);
+}
+
 void Dsp::runEq(float *buf, unsigned frames, const std::array<Coef, kBands> &coef, double (*z)[kMaxChannels][2]) const
 {
     const int ch = ch_;
-    for (int b = 0; b < kBands; ++b) {
-        const Coef k = coef[b];
-        // a 0 dB band is exactly the identity (b0 = 1, b1 = a1, b2 = a2): skip it
-        if (identity(k)) continue;
-        for (int c = 0; c < ch; ++c) {
-            double z1 = z[b][c][0], z2 = z[b][c][1];
-            float *p = buf + c;
-            for (unsigned i = 0; i < frames; ++i, p += ch) {
-                const double x = *p;
-                const double y = k.b0 * x + z1;
-                z1 = k.b1 * x - k.a1 * y + z2;
-                z2 = k.b2 * x - k.a2 * y;
-                *p = float(y);
-            }
-            // flush denormals so silence doesn't cost CPU
-            z[b][c][0] = std::abs(z1) < 1e-25 ? 0 : z1;
-            z[b][c][1] = std::abs(z2) < 1e-25 ? 0 : z2;
+    // a 0 dB band is exactly the identity (b0 = 1, b1 = a1, b2 = a2): skip it
+    Coef k[kBands];
+    int band[kBands], nb = 0;
+    for (int b = 0; b < kBands; ++b)
+        if (!identity(coef[b])) {
+            k[nb] = coef[b];
+            band[nb++] = b;
         }
-    }
+    if (!nb) return;
+    double s[kBands][kMaxChannels][2];
+    for (int j = 0; j < nb; ++j) std::memcpy(s[j], z[band[j]], sizeof s[j]);
+    if (ch == 2) dispatchStereo(nb, buf, frames, k, s, std::make_integer_sequence<int, kBands>());
+    else runBands(buf, frames, ch, k, nb, s);
+    // flush denormals so silence doesn't cost CPU
+    for (int j = 0; j < nb; ++j)
+        for (int c = 0; c < ch; ++c)
+            for (double &v : s[j][c]) z[band[j]][c][&v - s[j][c]] = std::abs(v) < 1e-25 ? 0 : v;
 }
 
 // Look-ahead limiter with a 0 dBFS ceiling. Each frame asks for the gain that
@@ -135,11 +196,41 @@ void Dsp::limit(float *buf, unsigned frames)
 {
     constexpr unsigned kRing = kLookahead + 2, kWindow = kLookahead + 1;
     const int ch = ch_;
+    const size_t n = size_t(frames) * ch;
+
+    // Nothing over the ceiling in this buffer nor in the window before it, and
+    // fully released: the limiter is only a delay line. Almost all music,
+    // almost all the time, and a copy instead of the per-frame work below.
+    if (frames >= kLookahead && quiet_ >= kWindow && release_ == 1.0f && !below_) {
+        float peak = 0;
+        for (size_t k = 0; k < n; ++k) peak = std::max(peak, std::abs(buf[k]));
+        if (peak <= 1.0f) {
+            float tail[kLookahead][kMaxChannels];
+            const size_t keep = size_t(frames - kLookahead) * ch;
+            for (unsigned j = 0; j < kLookahead; ++j) std::memcpy(tail[j], buf + keep + size_t(j) * ch, ch * sizeof(float));
+            std::memmove(buf + size_t(kLookahead) * ch, buf, keep * sizeof(float));
+            for (unsigned j = 0; j < kLookahead; ++j)
+                std::memcpy(buf + size_t(j) * ch, delay_[(dpos_ + j) % kLookahead], ch * sizeof(float));
+            std::memcpy(delay_, tail, sizeof tail);
+            dpos_ = 0;
+            frame_ += frames;
+            quiet_ += frames;
+            // the window holds only "no reduction" now
+            minHead_ = 0;
+            minTail_ = 1;
+            minVal_[0] = 1.0f;
+            minIdx_[0] = frame_ - 1;
+            boxSum_ = 0;
+            return;
+        }
+    }
+
     for (unsigned i = 0; i < frames; ++i) {
         float *x = buf + size_t(i) * ch;
         float peak = 0;
         for (int c = 0; c < ch; ++c) peak = std::max(peak, std::abs(x[c]));
         const float req = peak > 1.0f ? 1.0f / peak : 1.0f;
+        quiet_ = req < 1.0f ? 0 : quiet_ + 1;
 
         // sliding minimum (monotonic queue)
         while (minTail_ != minHead_ && minVal_[(minTail_ + kRing - 1) % kRing] >= req) minTail_ = (minTail_ + kRing - 1) % kRing;
@@ -202,6 +293,7 @@ void Dsp::process(float *buf, unsigned frames, unsigned live, bool jump)
             std::memset(box_, 0, sizeof box_);
             minHead_ = minTail_ = 0;
             below_ = 0;
+            quiet_ = 0;
             boxSum_ = 0;
             release_ = 1;
             releaseCoef_ = float(std::exp(-1.0 / (0.08 * rate_)));   // ~80 ms release

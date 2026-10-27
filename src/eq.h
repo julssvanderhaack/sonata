@@ -88,6 +88,7 @@ private:
     float release_ = 1, releaseCoef_ = 0.9995f;
     float box_[kLookahead]{};
     unsigned bpos_ = 0, below_ = 0;
+    unsigned quiet_ = 0;                     // frames in a row that needed no reduction
     double boxSum_ = kLookahead;
 
     // fades
