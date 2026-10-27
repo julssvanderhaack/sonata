@@ -137,6 +137,17 @@ void Playlist::setPlaying(quint64 uid)
     if (now >= 0) emit dataChanged(index(now, 0), index(now, ColCount - 1));
 }
 
+void Playlist::updateInfo(const QString &path, const TrackInfo &info)
+{
+    for (int r = 0; r < items_.size(); ++r) {
+        if (items_[r].info.path != path) continue;
+        items_[r].info = info;
+        items_[r].info.lyrics.clear();
+        emit dataChanged(index(r, 0), index(r, ColCount - 1));
+    }
+    emit changed();
+}
+
 void Playlist::sortBy(int col)
 {
     QCollator coll;

@@ -36,7 +36,7 @@ missing=$(ldd "$here/sonata" 2>/dev/null | awk '/not found/ {print $1}')
 if [ -n "$missing" ]; then
   echo "Faltan bibliotecas del sistema:" >&2
   echo "$missing" | sed 's/^/  /' >&2
-  echo "En Arch: sudo pacman -S --needed qt6-base ffmpeg pipewire" >&2
+  echo "En Arch: sudo pacman -S --needed qt6-base ffmpeg taglib pipewire" >&2
   echo "Si ya las tienes, tu sistema es más antiguo que el de la compilación: compílalo (ver README.md)." >&2
   exit 1
 fi

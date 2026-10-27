@@ -1,4 +1,5 @@
 #include "meta.h"
+#include "tagedit.h"
 #include <QCollator>
 #include <QDir>
 #include <QDirIterator>
@@ -52,6 +53,7 @@ TrackInfo readTrackInfo(const QString &path)
     if (t.albumArtist.isEmpty()) t.albumArtist = tag(fmt->metadata, sm, "albumartist");
     t.genre = tag(fmt->metadata, sm, "genre");
     t.date = tag(fmt->metadata, sm, "date").left(4);
+    if (t.date.isEmpty()) t.date = tag(fmt->metadata, sm, "WM/Year").left(4);   // FFmpeg leaves ASF's year unmapped
     t.trackNo = tag(fmt->metadata, sm, "track").section('/', 0, 0).toInt();
     t.disc = tag(fmt->metadata, sm, "disc").section('/', 0, 0).toInt();
     for (AVDictionary *d : {fmt->metadata, sm}) {
@@ -75,6 +77,7 @@ TrackInfo readTrackInfo(const QString &path)
             t.title = base.mid(dash + 3).trimmed();
         }
     }
+    applyTagOverride(t);
     return t;
 }
 
