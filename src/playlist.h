@@ -3,6 +3,7 @@
 #pragma once
 #include "meta.h"
 #include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
 #include <QHash>
 #include <QJsonObject>
 #include <QVector>
@@ -46,6 +47,7 @@ public:
     bool exportM3u(const QString &file) const;
 
     static quint64 newUid();
+    QString searchText(int row) const;   // folded title, artist, album and file name
 
     // saving: only lists that changed since they were last written
     bool dirty() const { return dirty_; }
@@ -77,4 +79,19 @@ private:
     bool dirty_ = false;
     mutable bool indexed_ = false;
     mutable QHash<quint64, int> rowIdx_;   // uid → row, rebuilt lazily
+};
+
+// Search box filter: every word must appear (no accents, any case). Sorting
+// is done by the model itself (the play order *is* the list order), so the
+// proxy only filters.
+class PlaylistFilter : public QSortFilterProxyModel {
+public:
+    using QSortFilterProxyModel::QSortFilterProxyModel;
+    void setQuery(const QString &q);
+
+protected:
+    bool filterAcceptsRow(int row, const QModelIndex &) const override;
+
+private:
+    QStringList words_;
 };

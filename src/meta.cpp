@@ -103,17 +103,31 @@ QImage readCover(const QString &path)
     }
     if (!img.isNull()) return img;
 
+    // A picture in the folder. Windows Media Player leaves one
+    // AlbumArt_{GUID}_Large/_Small pair per album it has seen (and a
+    // Folder.jpg of the last one): several GUIDs mean a folder of loose songs
+    // from different albums, where only a cover / front image can be trusted.
     QDir dir = QFileInfo(path).dir();
     QStringList pics;
-    for (const QFileInfo &fi : dir.entryInfoList(QDir::Files))
-        if (kImageExt.contains(fi.suffix().toLower())) pics << fi.fileName();
+    QSet<QString> guids;
+    static const QRegularExpression guid("\\{[0-9a-fA-F-]+\\}");
+    for (const QFileInfo &fi : dir.entryInfoList(QDir::Files)) {
+        if (!kImageExt.contains(fi.suffix().toLower())) continue;
+        pics << fi.fileName();
+        if (const auto m = guid.match(fi.fileName()); m.hasMatch()) guids.insert(m.captured().toLower());
+    }
     auto score = [](const QString &n) {
         const QString l = n.toLower();
         for (auto [k, s] : {std::pair{"cover", 0}, {"folder", 1}, {"front", 2}, {"album", 3}, {"art", 4}})
             if (l.contains(k)) return s;
         return 9;
     };
-    std::stable_sort(pics.begin(), pics.end(), [&](const QString &a, const QString &b) { return score(a) < score(b); });
+    if (guids.size() > 1)
+        pics.removeIf([&](const QString &n) { return n.contains('{') || (score(n) != 0 && score(n) != 2); });
+    std::stable_sort(pics.begin(), pics.end(), [&](const QString &a, const QString &b) {
+        if (score(a) != score(b)) return score(a) < score(b);
+        return a.contains("_Small", Qt::CaseInsensitive) < b.contains("_Small", Qt::CaseInsensitive);   // the large one
+    });
     for (const QString &f : pics)
         if (img.load(dir.filePath(f))) break;
     return img;
@@ -200,4 +214,16 @@ QString formatTime(double sec)
     const int s = int(sec);
     if (s >= 3600) return QString("%1:%2:%3").arg(s / 3600).arg(s / 60 % 60, 2, 10, QChar('0')).arg(s % 60, 2, 10, QChar('0'));
     return QString("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QChar('0'));
+}
+
+QString foldText(const QString &s)
+{
+    QString n = s.toLower();
+    n.replace(QChar(0xf1), QChar(1));   // keep ñ through the decomposition
+    n = n.normalized(QString::NormalizationForm_D);
+    QString out;
+    out.reserve(n.size());
+    for (QChar c : n)
+        if (c.category() != QChar::Mark_NonSpacing) out += c == QChar(1) ? QChar(0xf1) : c;
+    return out;
 }

@@ -36,6 +36,8 @@ add_executable(sonata
   src/tagedit.h src/tagedit.cpp
   src/lyricsview.h src/lyricsview.cpp
   src/playlist.h src/playlist.cpp
+  src/library.h src/library.cpp
+  src/libraryview.h src/libraryview.cpp
   src/eqpanel.h src/eqpanel.cpp
   src/mpris.h src/mpris.cpp
   src/theme.h src/theme.cpp

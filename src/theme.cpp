@@ -124,11 +124,14 @@ QTabBar::tab { background: %BGD%; color: %DIM%; padding: 7px 14px; border: none;
 QTabBar::tab:selected { color: %FG%; background: %BG%; border-bottom: 2px solid %ACC%; }
 QTabBar::tab:hover { color: %FG%; }
 QTabBar::close-button { image: none; }
-QTableView, QListView {
+QTableView, QListView, QTreeView {
   background: %BG%; alternate-background-color: %BGD%; border: none; outline: 0;
   selection-background-color: %SEL%; selection-color: %FG%; gridline-color: transparent;
 }
-QTableView { font-size: 12px; }   /* kept in step with Playlist's bold title font */
+QTableView, QTreeView { font-size: 12px; }   /* kept in step with Playlist's bold title font */
+QTreeView::item { padding: 3px 0; }
+QTreeView::item:hover { background: %BGL%; }
+QTreeView::item:selected { background: %SEL%; color: %FG%; }
 QTableView::item { padding: 0 6px; border: none; }
 QTableView::item:selected { background: %SEL%; }
 QHeaderView { background: %BG%; border: none; }

@@ -467,3 +467,24 @@ bool Playlist::exportM3u(const QString &file) const
     }
     return writeFileAtomic(file, out);
 }
+
+QString Playlist::searchText(int row) const
+{
+    const TrackInfo &t = items_[row].info;
+    return foldText(t.displayTitle() + ' ' + t.displayArtist() + ' ' + t.album + ' ' + t.path);
+}
+
+void PlaylistFilter::setQuery(const QString &q)
+{
+    words_ = foldText(q).split(' ', Qt::SkipEmptyParts);
+    invalidateRowsFilter();
+}
+
+bool PlaylistFilter::filterAcceptsRow(int row, const QModelIndex &) const
+{
+    if (words_.isEmpty()) return true;
+    const QString hay = static_cast<Playlist *>(sourceModel())->searchText(row);
+    for (const QString &w : words_)
+        if (!hay.contains(w)) return false;
+    return true;
+}

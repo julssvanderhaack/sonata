@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "eqpanel.h"
+#include "library.h"
+#include "libraryview.h"
 #include "lyricsview.h"
 #include "playlist.h"
 #include "spectrum.h"
@@ -71,26 +73,6 @@ static QString humanDuration(double s)
     return QString("%1 min").arg(m);
 }
 
-// Sorting is done by the model itself (the play order *is* the list order),
-// so the proxy only filters.
-class FilterProxy : public QSortFilterProxyModel {
-public:
-    using QSortFilterProxyModel::QSortFilterProxyModel;
-
-protected:
-    bool filterAcceptsRow(int row, const QModelIndex &) const override
-    {
-        const QString f = filterRegularExpression().pattern();
-        if (f.isEmpty()) return true;
-        auto *pl = static_cast<Playlist *>(sourceModel());
-        const TrackInfo &t = pl->at(row).info;
-        const QString hay = t.displayTitle() + ' ' + t.displayArtist() + ' ' + t.album + ' ' + t.path;
-        for (const QString &w : f.split(' ', Qt::SkipEmptyParts))
-            if (!hay.contains(w, Qt::CaseInsensitive)) return false;
-        return true;
-    }
-};
-
 // ─────────────────────────── construction ───────────────────────────
 
 MainWindow::MainWindow()
@@ -109,7 +91,9 @@ MainWindow::MainWindow()
     split_ = new QSplitter(Qt::Horizontal);
     split_->setHandleWidth(1);
     split_->setChildrenCollapsible(true);
-    split_->addWidget(listPane_ = buildPlaylistPane());
+    lib_ = new Library(this);
+    libView_ = new LibraryView(lib_);
+    split_->addWidget(listPane_ = buildListPane());
     split_->addWidget(nowPane_ = buildNowPane());
     split_->setStretchFactor(0, 3);
     split_->setStretchFactor(1, 2);
@@ -151,6 +135,24 @@ MainWindow::MainWindow()
     saveTimer_->setSingleShot(true);
     saveTimer_->setInterval(1500);
     connect(saveTimer_, &QTimer::timeout, this, &MainWindow::saveState);
+
+    libView_->setInUse([this](Playlist *p) {
+        return p == playingList_ || p == returnTo_.list
+               || std::any_of(queue_.begin(), queue_.end(), [p](const Entry &e) { return e.list == p; });
+    });
+    libView_->setPlaybackMenu([this](QMenu &m) { addPlaybackMenu(m); });
+    connect(libView_, &LibraryView::playRequested, this, [this](Playlist *pl, int row, bool shuffle) {
+        if (!pl || pl->count() == 0) return;
+        if (row < 0) {
+            setShuffle(shuffle);   // "Reproducir" in order, "Aleatorio" shuffled
+            row = shuffle ? QRandomGenerator::global()->bounded(pl->count()) : 0;
+        }
+        playItem(pl, pl->at(row).uid);
+    });
+    connect(libView_, &LibraryView::songMenuRequested, this, [this](Playlist *pl, const QList<int> &rows, const QPoint &g) {
+        songMenu(pl, rows, g, false);
+    });
+    connect(libView_, &LibraryView::settingsChanged, this, &MainWindow::scheduleSave);
 
     connect(engine_, &Engine::trackStarted, this, &MainWindow::onTrackStarted);
     connect(engine_, &Engine::failed, this, &MainWindow::onFailed);
@@ -216,7 +218,14 @@ MainWindow::MainWindow()
     sc(Qt::CTRL | Qt::Key_Down, [this] { setVolume(volume() - 0.05); });
     sc(Qt::CTRL | Qt::Key_O, [this] { openFilesDialog(false); });
     sc(Qt::CTRL | Qt::SHIFT | Qt::Key_O, [this] { openFilesDialog(true); });
-    sc(Qt::CTRL | Qt::Key_F, [this] { search_->setFocus(); search_->selectAll(); });
+    sc(Qt::CTRL | Qt::Key_F, [this] {
+        if (listStack_->currentWidget() == libView_) libView_->focusSearch();
+        else {
+            search_->setFocus();
+            search_->selectAll();
+        }
+    });
+    sc(Qt::CTRL | Qt::Key_B, [this] { setLibraryShown(listStack_->currentWidget() != libView_); });
     sc(Qt::CTRL | Qt::Key_T, [this] { addList(new Playlist(QString("Lista %1").arg(lists_.size() + 1), this), true); });
     sc(Qt::CTRL | Qt::Key_W, [this] { closeList(tabs_->currentIndex()); });
     sc(Qt::CTRL | Qt::Key_L, [this] { setExtrasVisible(true); lyricsTab_->click(); });
@@ -225,6 +234,13 @@ MainWindow::MainWindow()
     sc(Qt::CTRL | Qt::Key_K, [this] { setExtrasVisible(!extrasWanted_); });
     sc(Qt::CTRL | Qt::Key_J, [this] {   // jump to what's playing
         if (!playingList_) return;
+        if (!lists_.contains(playingList_)) {
+            const Item *it = playingList_->find(playingUid_);
+            setLibraryShown(true);
+            if (it) libView_->reveal(playingList_, it->info.path);
+            return;
+        }
+        setLibraryShown(false);
         tabs_->setCurrentIndex(lists_.indexOf(playingList_));
         const int r = playingList_->rowOf(playingUid_);
         if (r >= 0) table_->scrollTo(proxy_->mapFromSource(playingList_->index(r, 0)), QAbstractItemView::PositionAtCenter);
@@ -304,7 +320,7 @@ QWidget *MainWindow::buildPlaylistPane()
     v->addLayout(tools);
 
     table_ = new QTableView;
-    proxy_ = new FilterProxy(this);
+    proxy_ = new PlaylistFilter(this);
     table_->setModel(proxy_);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -339,8 +355,7 @@ QWidget *MainWindow::buildPlaylistPane()
     connect(addFiles, &QToolButton::clicked, this, [this] { openFilesDialog(false); });
     connect(addDir, &QToolButton::clicked, this, [this] { openFilesDialog(true); });
     connect(search_, &QLineEdit::textChanged, this, [this](const QString &s) {
-        proxy_->setFilterRegularExpression(QRegularExpression(QRegularExpression::escape(s.trimmed()).replace("\\ ", " ")));
-        proxy_->invalidate();
+        proxy_->setQuery(s);
         table_->setDragEnabled(s.trimmed().isEmpty());
         updateStatus();
     });
@@ -858,7 +873,53 @@ Playlist *MainWindow::currentList() const
 
 QVector<Playlist *> MainWindow::allLists() const
 {
-    return lists_;
+    return lists_ + libView_->contexts();
+}
+
+QWidget *MainWindow::buildListPane()
+{
+    auto *pane = new QWidget;
+    auto *v = new QVBoxLayout(pane);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(0);
+    auto *modeRow = new QFrame;
+    modeRow->setProperty("role", "panel");
+    auto *h = new QHBoxLayout(modeRow);
+    h->setContentsMargins(6, 4, 6, 0);
+    h->setSpacing(0);
+    modeLib_ = new QToolButton;
+    modeLib_->setText("Biblioteca");
+    modeLib_->setToolTip("Tu música por álbumes, artistas y carpetas (Ctrl+B)");
+    modeLists_ = new QToolButton;
+    modeLists_->setText("Listas");
+    modeLists_->setToolTip("Tus listas de reproducción (Ctrl+B)");
+    for (QToolButton *b : {modeLib_, modeLists_}) {
+        b->setCheckable(true);
+        b->setProperty("role", "pagetab");
+        b->setCursor(Qt::PointingHandCursor);
+        b->setFocusPolicy(Qt::NoFocus);
+        QFont f = b->font();
+        f.setBold(true);
+        b->setFont(f);
+        h->addWidget(b);
+    }
+    h->addStretch();
+    v->addWidget(modeRow);
+    listStack_ = new QStackedWidget;
+    listStack_->addWidget(libView_);
+    listStack_->addWidget(buildPlaylistPane());
+    v->addWidget(listStack_, 1);
+    connect(modeLib_, &QToolButton::clicked, this, [this] { setLibraryShown(true); });
+    connect(modeLists_, &QToolButton::clicked, this, [this] { setLibraryShown(false); });
+    return pane;
+}
+
+void MainWindow::setLibraryShown(bool on)
+{
+    listStack_->setCurrentIndex(on ? 0 : 1);
+    modeLib_->setChecked(on);
+    modeLists_->setChecked(!on);
+    scheduleSave();
 }
 
 Playlist *MainWindow::addList(Playlist *pl, bool select)
@@ -947,6 +1008,7 @@ void MainWindow::addPaths(const QStringList &paths, bool playNow)
     for (const QString &f : expandPaths(paths))
         if (isAudioFile(f) || QFileInfo(f).isFile()) files << f;
     if (files.isEmpty()) return;
+    if (!loading_) setLibraryShown(false);   // where they went
     Playlist *pl = currentList();
     if (!pl) pl = addList(new Playlist("Lista", this), true);
 
@@ -1009,44 +1071,50 @@ void MainWindow::dropEvent(QDropEvent *e)
 
 void MainWindow::showContextMenu(const QPoint &pos)
 {
-    Playlist *pl = currentList();
     QList<int> rows;
     for (const QModelIndex &i : table_->selectionModel()->selectedRows()) rows << proxy_->mapToSource(i).row();
     std::sort(rows.begin(), rows.end());
-    if (rows.isEmpty()) return;
+    if (!rows.isEmpty()) songMenu(currentList(), rows, table_->viewport()->mapToGlobal(pos), true);
+}
+
+// The menu for some songs, in a list (inList: they can be removed from it) or in the library.
+void MainWindow::songMenu(Playlist *pl, const QList<int> &rows, const QPoint &global, bool inList)
+{
+    if (!pl || rows.isEmpty()) return;
     QMenu m(this);
     m.addAction("Reproducir", this, [=, this] { playItem(pl, pl->at(rows.front()).uid); });
     m.addAction("Reproducir a continuación", this, [=, this] { enqueue(pl, rows, true); });
     m.addAction("Añadir a la cola", this, [=, this] { enqueue(pl, rows, false); });
     if (std::any_of(rows.begin(), rows.end(), [&](int r) { return queue_.contains(Entry{pl, pl->at(r).uid}); }))
         m.addAction("Quitar de la cola", this, [=, this] { dequeue(pl, rows); });
+    m.addSeparator();
+    auto paths = [=] {
+        QStringList out;
+        for (int r : rows) out << pl->at(r).info.path;
+        return out;
+    };
+    QMenu *copy = m.addMenu("Añadir a la lista");
+    for (Playlist *other : lists_) {
+        if (other == pl) continue;
+        copy->addAction(other->name(), this, [=] { other->insertPaths(paths()); });
+    }
+    if (!copy->isEmpty()) copy->addSeparator();
+    copy->addAction("Nueva lista", this, [=, this] {
+        auto *nl = addList(new Playlist(rows.size() == pl->count() && !inList ? pl->name() : QString("Lista %1").arg(lists_.size() + 1), this), false);
+        nl->insertPaths(paths());
+    });
     m.addAction("Abrir carpeta", this, [=] {
         const QString path = pl->at(rows.front()).info.path;
         if (!QProcess::startDetached("nautilus", {"--select", path}))
             QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
     });
-    if (lists_.size() > 1) {
-        QMenu *copy = m.addMenu("Copiar a la lista");
-        for (Playlist *other : lists_) {
-            if (other == pl) continue;
-            copy->addAction(other->name(), this, [=] {
-                QStringList paths;
-                for (int r : rows) paths << pl->at(r).info.path;
-                other->insertPaths(paths);
-            });
-        }
-    }
-    m.addAction("Nueva lista con la selección", this, [=, this] {
-        QStringList paths;
-        for (int r : rows) paths << pl->at(r).info.path;
-        auto *nl = addList(new Playlist(QString("Lista %1").arg(lists_.size() + 1), this), false);
-        nl->insertPaths(paths);
-    });
     m.addAction(rows.size() == 1 ? QString("Editar etiquetas…") : QString("Editar etiquetas (%1)…").arg(rows.size()),
                 this, [=, this] { editTags(pl, rows); });
-    m.addSeparator();
-    m.addAction(QString("Quitar de la lista (%1)").arg(rows.size()), this, [=] { pl->removeRowsList(rows); });
-    m.exec(table_->viewport()->mapToGlobal(pos));
+    if (inList) {
+        m.addSeparator();
+        m.addAction(QString("Quitar de la lista (%1)").arg(rows.size()), this, [=] { pl->removeRowsList(rows); });
+    }
+    m.exec(global);
 }
 
 void MainWindow::updateStatus()
@@ -1102,6 +1170,7 @@ void MainWindow::playItem(Playlist *pl, quint64 uid, double start, bool paused, 
         if (history_.isEmpty() || history_.back() != uid) history_ << uid;
     }
     planNext();
+    libView_->dropUnused();
     emit metadataChanged();
 }
 
@@ -1136,6 +1205,7 @@ void MainWindow::onTrackStarted(quint64 token)
     if (const Item *it = pl->find(uid)) showTrack(it);
     format_->setText(engine_->formatInfo());
     planNext();
+    libView_->dropUnused();
     emit metadataChanged();
 }
 
@@ -1264,6 +1334,7 @@ void MainWindow::queueChanged()
     for (Playlist *l : allLists()) l->setQueueMarks(marks.value(l));
     planNext();
     updateStatus();
+    libView_->dropUnused();
 }
 
 // ─────────────────────────── sleep timer ───────────────────────────
@@ -1322,6 +1393,7 @@ void MainWindow::showTrack(const Item *it)
 {
     const TrackInfo &t = it->info;
     showTags(t);
+    libView_->setNowPlaying(t.path);
     format_->setText(engine_->formatInfo());
     total_->setText(formatTime(t.duration));
     seek_->setRange(t.duration > 0 ? t.duration : 1);
@@ -1427,6 +1499,7 @@ void MainWindow::editTags(Playlist *pl, const QList<int> &rows)
     connect(w, &QFutureWatcher<QVector<TrackInfo>>::finished, this, [this, w] {
         w->deleteLater();
         const QVector<TrackInfo> infos = w->result();
+        lib_->updateInfo(infos);
         const Item *cur = hasCurrent() ? playingList_->find(playingUid_) : nullptr;
         const QString curPath = cur ? cur->info.path : QString();
         for (const TrackInfo &t : infos) {
@@ -1655,9 +1728,16 @@ void MainWindow::saveState()
         {"listVisible", listPane_->isVisible()},
         {"extrasVisible", extrasWanted_},
     };
+    o["libraryFolders"] = QJsonArray::fromStringList(lib_->roots());
+    o["libraryAlbumSort"] = int(lib_->albumSort());
+    o["librarySection"] = int(libView_->section());
+    o["mode"] = listStack_->currentWidget() == libView_ ? "library" : "lists";
     if (hasCurrent()) {
         double pos = engine_->state() != Engine::Stopped ? engine_->position() : std::max(0.0, resumePos_);
-        o["playing"] = QJsonObject{{"list", playingList_->fileId()}, {"row", playingList_->rowOf(playingUid_)}, {"pos", pos}};
+        if (const QString desc = libView_->describe(playingList_); !desc.isEmpty())
+            o["playing"] = QJsonObject{{"lib", desc}, {"path", playingList_->find(playingUid_)->info.path}, {"pos", pos}};
+        else
+            o["playing"] = QJsonObject{{"list", playingList_->fileId()}, {"row", playingList_->rowOf(playingUid_)}, {"pos", pos}};
     }
     writeFileAtomic(stateFile(), QJsonDocument(o).toJson());
 }
@@ -1718,12 +1798,24 @@ void MainWindow::loadState()
     else if (o.value("page").toString() == "spectrum") specTab_->click();
     if (!o.value("extrasVisible").toBool(true)) setExtrasVisible(false);
 
+    // the library: ~/Music (or the XDG music folder) unless the user chose others
+    QStringList roots;
+    if (o.contains("libraryFolders")) {
+        for (const QJsonValue &f : o.value("libraryFolders").toArray()) roots << f.toString();
+    } else if (const QString music = QStandardPaths::writableLocation(QStandardPaths::MusicLocation);
+               QFileInfo(music).isDir() && music != QDir::homePath()) {
+        roots << music;
+    }
+    lib_->setAlbumSort(Library::AlbumSort(std::clamp(o.value("libraryAlbumSort").toInt(Library::ByArtist), 0, 2)));
+    lib_->setRoots(roots);
+    libView_->setSection(LibraryView::Section(std::clamp(o.value("librarySection").toInt(LibraryView::Albums), 0, 4)));
+    bool anySongs = false;
+    for (Playlist *pl : lists_) anySongs |= pl->count() > 0;
+    setLibraryShown(o.contains("mode") ? o.value("mode").toString() == "library" : !anySongs);
+
     // last track, paused where we left it (press play to continue)
     const QJsonObject pj = o.value("playing").toObject();
-    for (Playlist *pl : lists_) {
-        if (pl->fileId() != pj.value("list").toString()) continue;
-        const int row = pj.value("row").toInt(-1);
-        if (row < 0 || row >= pl->count()) break;
+    auto resume = [&](Playlist *pl, int row) {
         playingList_ = pl;
         playingUid_ = pl->at(row).uid;
         pl->setPlaying(playingUid_);
@@ -1731,6 +1823,23 @@ void MainWindow::loadState()
         resumePos_ = pj.value("pos").toDouble();
         seek_->setValue(resumePos_);
         elapsed_->setText(formatTime(resumePos_));
+    };
+    // from the library: once its index has the song (the first time, after the scan)
+    if (pj.contains("lib") && !resumeFromLibrary(pj)) {
+        auto *conn = new QMetaObject::Connection;
+        auto stop = [conn] {
+            QObject::disconnect(*conn);
+            delete conn;
+        };
+        *conn = connect(lib_, &Library::changed, this, [this, pj, stop] {
+            if (hasCurrent() || resumeFromLibrary(pj) || !lib_->scanning()) stop();
+        });
+    }
+    for (Playlist *pl : lists_) {
+        if (pj.contains("lib") || pl->fileId() != pj.value("list").toString()) continue;
+        const int row = pj.value("row").toInt(-1);
+        if (row < 0 || row >= pl->count()) break;
+        resume(pl, row);
         table_->scrollTo(proxy_->mapFromSource(pl->index(row, 0)), QAbstractItemView::PositionAtCenter);
         break;
     }
@@ -1746,6 +1855,26 @@ void MainWindow::closeEvent(QCloseEvent *e)
     e->accept();
 }
 
+bool MainWindow::resumeFromLibrary(const QJsonObject &pj)
+{
+    Playlist *pl = libView_->restore(pj.value("lib").toString());
+    if (!pl) return false;
+    const QString path = pj.value("path").toString();
+    for (int r = 0; r < pl->count(); ++r) {
+        if (pl->at(r).info.path != path) continue;
+        playingList_ = pl;
+        playingUid_ = pl->at(r).uid;
+        pl->setPlaying(playingUid_);
+        showTrack(&pl->at(r));
+        resumePos_ = pj.value("pos").toDouble();
+        seek_->setValue(resumePos_);
+        elapsed_->setText(formatTime(resumePos_));
+        return true;
+    }
+    libView_->dropUnused();
+    return false;
+}
+
 // Back to the window after a while: songs retagged elsewhere meanwhile are read again.
 void MainWindow::changeEvent(QEvent *e)
 {
@@ -1755,6 +1884,7 @@ void MainWindow::changeEvent(QEvent *e)
     if (now - lastRefresh_ < 60000) return;
     lastRefresh_ = now;
     for (Playlist *pl : lists_) pl->refreshChanged();
+    lib_->rescanIfStale();
 }
 
 void MainWindow::reloadTheme()

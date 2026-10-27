@@ -21,7 +21,8 @@ letras de las capturas son inventadas, y el tema es Cobalt2 de Omarchy.*
 
 - Reproduce cualquier formato de audio que entienda FFmpeg (MP3, FLAC, Opus, Ogg,
   AAC/M4A, WAV, APE, WavPack, WMA…), sin cortes entre pistas con la misma frecuencia
-  de muestreo y sin remuestrear: el audio va tal cual a PipeWire.
+  de muestreo y sin remuestrear: el audio va tal cual a PipeWire, también el
+  multicanal (hasta 7.1). Si PipeWire se reinicia, sigue sonando.
 - **Letras**: busca un `.lrc` junto al archivo, la letra incrustada en las etiquetas
   o la descarga de [lrclib.net](https://lrclib.net). Las sincronizadas resaltan la
   línea que suena y se puede pulsar una línea para saltar a ella; ±0,5 s para
@@ -33,8 +34,19 @@ letras de las capturas son inventadas, y el tema es Cobalt2 de Omarchy.*
   Al corregir la canción que suena, la letra se vuelve a buscar con los datos
   nuevos. Si el archivo no se puede escribir, la corrección puede quedarse solo en
   Sonata.
+- **Biblioteca** con tu música por canciones, álbumes (con carátulas),
+  artistas, carpetas y géneros, como en Sonata para Android. Lee las carpetas
+  que elijas (por defecto `~/Music`); la primera vez lee las etiquetas y luego
+  solo mira qué archivos han cambiado.
+- **Cola**: «Reproducir a continuación» y «Añadir a la cola» desde cualquier
+  canción, álbum o artista; después la lista sigue por donde iba.
+- **Temporizador para dormir**: para dentro de un rato (con un fundido) o al
+  acabar la canción.
 - **Ecualizador** de 10 bandas con preajustes, los tuyos propios y ajuste
   automático de volumen para no saturar.
+- **ReplayGain**, por canción o por álbum, para que todas suenen igual de fuerte.
+- Un limitador en lugar de recortar cuando algo pasa de 0 dB, y fundidos
+  cortos al pausar, saltar o mover el ecualizador: sin chasquidos.
 - **Espectro** en tiempo real: una curva continua de 20 Hz hasta la frecuencia de
   Nyquist de la canción (la mitad de su frecuencia de muestreo).
 - **Listas** en pestañas: arrastrar y soltar, búsqueda, ordenar, quitar duplicados,
@@ -102,7 +114,9 @@ Por defecto se optimiza para el procesador de la máquina que compila
 | Ctrl + ← / → | Canción anterior / siguiente |
 | Ctrl + ↑ / ↓ | Volumen |
 | Ctrl + O / Ctrl + Mayús + O | Añadir archivos / carpeta |
-| Ctrl + F | Buscar en la lista |
+| Ctrl + F | Buscar en la biblioteca o en la lista |
+| Ctrl + B | Biblioteca / listas |
+| Ctrl + J | Ir a lo que suena |
 | Ctrl + T / Ctrl + W | Nueva lista / cerrar lista |
 | Ctrl + L / E / G | Letra / ecualizador / espectro |
 | Ctrl + K | Mostrar u ocultar letra, ecualizador y espectro |
@@ -112,7 +126,7 @@ Por defecto se optimiza para el procesador de la máquina que compila
 
 - Listas: `~/.local/share/sonata/playlists/`
 - Estado (volumen, ecualizador, posición): `~/.local/state/sonata/state.json`
-- Letras y carátulas descargadas: `~/.cache/sonata/`
+- Letras, carátulas e índice de la biblioteca: `~/.cache/sonata/`
 - Correcciones de etiquetas guardadas solo en Sonata: `~/.local/share/sonata/tags.json`
 
 ## Licencia

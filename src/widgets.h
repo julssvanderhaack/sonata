@@ -27,6 +27,12 @@ inline const QString Eq = QString::fromUcs4(U"\U000F00EC");
 inline const QString Lyrics = QString::fromUcs4(U"\U000F036C");
 inline const QString Sidebar = QString::fromUcs4(U"\U000F0CB8");
 inline const QString Sleep = QString::fromUcs4(U"\U000F04B2");
+inline const QString Back = QString::fromUcs4(U"\U000F004D");
+inline const QString Refresh = QString::fromUcs4(U"\U000F0450");
+inline const QString Album = QString::fromUcs4(U"\U000F0025");
+inline const QString Tag = QString::fromUcs4(U"\U000F04F9");
+inline const QString Artist = QString::fromUcs4(U"\U000F0803");
+inline const QString FolderMusic = QString::fromUcs4(U"\U000F1359");
 
 }
 

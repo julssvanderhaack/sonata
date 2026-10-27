@@ -3,6 +3,7 @@
 // Single instance: launching it again (e.g. clicking another file in the file
 // manager) hands the files to the running window over a unix socket instead
 // of opening a second player.
+#include "libraryview.h"
 #include "mainwindow.h"
 #include "mpris.h"
 #include "theme.h"
@@ -207,6 +208,8 @@ int main(int argc, char **argv)
         else if (!line.isEmpty() && !line.startsWith("--")) files << QString::fromUtf8(line);
     }
     if (!files.isEmpty()) w.addPaths(files, playNow);
+    if (qEnvironmentVariableIsSet("SONATA_LIBOPEN"))   // tests: a library page ("album:<key>", "folder:<path>"…)
+        QTimer::singleShot(1500, &w, [&w] { w.findChild<LibraryView *>()->openPage(qEnvironmentVariable("SONATA_LIBOPEN")); });
     if (qEnvironmentVariableIsSet("SONATA_SEEK"))   // tests
         QTimer::singleShot(1500, &w, [&w] { w.seekTo(qEnvironmentVariable("SONATA_SEEK").toDouble()); });
     const int rc = app.exec();

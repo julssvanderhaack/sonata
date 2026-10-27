@@ -24,3 +24,5 @@ QString cacheDir(const QString &sub);
 bool fileChanged(const TrackInfo &t);              // stat only: the file differs from when it was read
 bool writeFileAtomic(const QString &path, const QByteArray &data);   // never leaves half a file
 QString formatTime(double sec);
+// Lower case without accents, for search and grouping ('ñ' stays: it is a letter in Spanish).
+QString foldText(const QString &s);

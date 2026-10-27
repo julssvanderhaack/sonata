@@ -6,18 +6,21 @@
 #include <QPointer>
 #include <QSet>
 
+class QJsonObject;
 class QLabel;
 class QMenu;
 class QLineEdit;
 class QMimeData;
 class QScrollArea;
-class QSortFilterProxyModel;
+class PlaylistFilter;
 class QSplitter;
 class QStackedWidget;
 class QTabBar;
 class QTableView;
 class QToolButton;
 class Bar;
+class Library;
+class LibraryView;
 class CoverView;
 class EqPanel;
 class GlyphButton;
@@ -71,7 +74,10 @@ protected:
     void dropEvent(QDropEvent *) override;
 
 private:
+    QWidget *buildListPane();       // "Biblioteca | Listas" over the two
     QWidget *buildPlaylistPane();
+    void setLibraryShown(bool on);
+    void songMenu(Playlist *pl, const QList<int> &rows, const QPoint &global, bool inList);
     QWidget *buildNowPane();
     QWidget *buildTransport();
 
@@ -112,17 +118,22 @@ private:
     void showContextMenu(const QPoint &pos);
     void openFilesDialog(bool folder);
     void loadState();
+    bool resumeFromLibrary(const QJsonObject &playing);
     void saveState();
     void scheduleSave();
     void reloadTheme();
 
     Engine *engine_;
     LyricsFetcher *fetcher_;
+    Library *lib_;
+    LibraryView *libView_;
+    QStackedWidget *listStack_;
+    QToolButton *modeLib_, *modeLists_;
 
     // widgets
     QTabBar *tabs_ = nullptr;
     QTableView *table_ = nullptr;
-    QSortFilterProxyModel *proxy_ = nullptr;
+    PlaylistFilter *proxy_ = nullptr;
     QLineEdit *search_;
     QLabel *status_;
     QSplitter *split_;
