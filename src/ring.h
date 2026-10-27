@@ -38,14 +38,21 @@ public:
     {
         const uint64_t w = w_.load(std::memory_order_relaxed);
         discard_.store(w, std::memory_order_release);
+        flushes_.fetch_add(1, std::memory_order_release);
         return w;
     }
 
     // ---- consumer side (realtime) ----
-    size_t read(float *dst, size_t n)
+    // `jumped` = this read skips flushed audio (a seek or a new track starts here).
+    size_t read(float *dst, size_t n, bool *jumped = nullptr)
     {
         uint64_t r = r_.load(std::memory_order_relaxed);
         const uint64_t d = discard_.load(std::memory_order_acquire);
+        if (jumped) {
+            const uint64_t gen = flushes_.load(std::memory_order_acquire);
+            *jumped = gen != seenFlushes_;
+            seenFlushes_ = gen;
+        }
         if (d > r) r = d;
         const uint64_t w = w_.load(std::memory_order_acquire);
         n = std::min<size_t>(n, size_t(w - r));
@@ -63,4 +70,6 @@ private:
     alignas(64) std::atomic<uint64_t> w_{0};
     alignas(64) std::atomic<uint64_t> r_{0};
     alignas(64) std::atomic<uint64_t> discard_{0};
+    std::atomic<uint64_t> flushes_{0};
+    uint64_t seenFlushes_ = 0;   // reader's
 };

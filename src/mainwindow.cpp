@@ -11,6 +11,7 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDBusObjectPath>
 #include <QDesktopServices>
 #include <QDir>
@@ -226,6 +227,7 @@ MainWindow::MainWindow()
     connect(watch, &QFileSystemWatcher::directoryChanged, themeTimer, qOverload<>(&QTimer::start));
 
     loadState();
+    lastRefresh_ = QDateTime::currentMSecsSinceEpoch();   // loading the lists already checks them
 }
 
 MainWindow::~MainWindow() = default;
@@ -810,6 +812,11 @@ Playlist *MainWindow::currentList() const
     return i >= 0 && i < lists_.size() ? lists_[i] : nullptr;
 }
 
+QVector<Playlist *> MainWindow::allLists() const
+{
+    return lists_;
+}
+
 Playlist *MainWindow::addList(Playlist *pl, bool select)
 {
     pl->setParent(this);
@@ -1109,10 +1116,9 @@ quint64 MainWindow::pickNext(Playlist *pl, quint64 from, bool manual)
             if (pool.isEmpty()) return 0;
         }
         // keep the same pick while it's still valid so "next" doesn't keep changing
-        static quint64 planned = 0;
-        if (pool.contains(planned)) return planned;
-        planned = pool[QRandomGenerator::global()->bounded(int(pool.size()))];
-        return planned;
+        if (pool.contains(shufflePlanned_)) return shufflePlanned_;
+        shufflePlanned_ = pool[QRandomGenerator::global()->bounded(int(pool.size()))];
+        return shufflePlanned_;
     }
     const int row = pl->rowOf(from);
     for (int k = 1; k <= pl->count(); ++k) {
@@ -1180,10 +1186,15 @@ void MainWindow::showTrack(const Item *it)
         QString art;
     };
     auto *w = new QFutureWatcher<Res>(this);
-    connect(w, &QFutureWatcher<Res>::finished, this, [this, w, ltok] {
+    connect(w, &QFutureWatcher<Res>::finished, this, [this, w, ltok, known] {
         w->deleteLater();
         if (ltok != lyricsToken_) return;
         Res r = w->result();
+        if (known.scanned && (r.info.mtime != known.mtime || r.info.size != known.size)) {
+            // retagged by another program since the list read it
+            for (Playlist *l : allLists()) l->updateInfo(r.info.path, r.info);
+            showTags(r.info);
+        }
         cover_->setImage(r.img);
         artFile_ = r.art;
         emit metadataChanged();
@@ -1262,7 +1273,7 @@ void MainWindow::editTags(Playlist *pl, const QList<int> &rows)
         const Item *cur = hasCurrent() ? playingList_->find(playingUid_) : nullptr;
         const QString curPath = cur ? cur->info.path : QString();
         for (const TrackInfo &t : infos) {
-            for (Playlist *l : lists_) l->updateInfo(t.path, t);
+            for (Playlist *l : allLists()) l->updateInfo(t.path, t);
             if (t.path != curPath) continue;
             showTags(t);
             emit metadataChanged();
@@ -1454,13 +1465,10 @@ void MainWindow::saveState()
     for (Playlist *pl : lists_) {
         ids << pl->fileId();
         keep.insert(pl->fileId() + ".json");
-        QFile f(plDir + '/' + pl->fileId() + ".json.tmp");
-        if (f.open(QIODevice::WriteOnly)) {
-            f.write(QJsonDocument(pl->toJson()).toJson(QJsonDocument::Compact));
-            f.close();
-            QFile::remove(plDir + '/' + pl->fileId() + ".json");
-            f.rename(plDir + '/' + pl->fileId() + ".json");
-        }
+        // a volume change shouldn't rewrite thousands of songs: only lists that changed
+        const QString file = plDir + '/' + pl->fileId() + ".json";
+        if (!pl->dirty() && QFileInfo::exists(file)) continue;
+        if (writeFileAtomic(file, QJsonDocument(pl->toJson()).toJson(QJsonDocument::Compact))) pl->setSaved();
     }
     for (const QString &f : QDir(plDir).entryList({"*.json"}, QDir::Files))
         if (!keep.contains(f)) QFile::remove(plDir + '/' + f);
@@ -1475,7 +1483,8 @@ void MainWindow::saveState()
         {"volume", volume()},
         {"shuffle", shuffle_},
         {"repeat", int(repeat_)},
-        {"eq", QJsonObject{{"enabled", eq.enabled}, {"preamp", eq.preamp}, {"auto", eq.autoPreamp}, {"gains", gains}}},
+        {"eq", QJsonObject{{"enabled", eq.enabled}, {"preamp", eq.preamp}, {"auto", eq.autoPreamp}, {"gains", gains},
+                           {"replayGain", int(eq.replayGain)}}},
         {"eqCustom", eq_->customPresets()},
         {"split", QString::fromLatin1(splitH_.toBase64())},
         {"splitStack", QString::fromLatin1(splitV_.toBase64())},
@@ -1487,8 +1496,7 @@ void MainWindow::saveState()
         double pos = engine_->state() != Engine::Stopped ? engine_->position() : std::max(0.0, resumePos_);
         o["playing"] = QJsonObject{{"list", playingList_->fileId()}, {"row", playingList_->rowOf(playingUid_)}, {"pos", pos}};
     }
-    QFile f(stateFile());
-    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QJsonDocument(o).toJson());
+    writeFileAtomic(stateFile(), QJsonDocument(o).toJson());
 }
 
 void MainWindow::loadState()
@@ -1537,6 +1545,7 @@ void MainWindow::loadState()
     eq.enabled = je.value("enabled").toBool();
     eq.preamp = float(je.value("preamp").toDouble());
     eq.autoPreamp = je.value("auto").toBool(true);
+    eq.replayGain = ReplayGain(std::clamp(je.value("replayGain").toInt(), 0, 2));
     const QJsonArray ga = je.value("gains").toArray();
     for (int b = 0; b < kBands && b < ga.size(); ++b) eq.gains[b] = float(ga[b].toDouble());
     eq_->setCustomPresets(o.value("eqCustom").toObject());
@@ -1572,6 +1581,17 @@ void MainWindow::closeEvent(QCloseEvent *e)
     saveState();
     engine_->stop();
     e->accept();
+}
+
+// Back to the window after a while: songs retagged elsewhere meanwhile are read again.
+void MainWindow::changeEvent(QEvent *e)
+{
+    QMainWindow::changeEvent(e);
+    if (e->type() != QEvent::ActivationChange || !isActiveWindow()) return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - lastRefresh_ < 60000) return;
+    lastRefresh_ = now;
+    for (Playlist *pl : lists_) pl->refreshChanged();
 }
 
 void MainWindow::reloadTheme()

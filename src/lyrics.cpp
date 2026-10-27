@@ -206,8 +206,7 @@ void LyricsFetcher::search(const TrackInfo &t, quint64 token, const QString &cac
         }
         if (best.isEmpty()) {
             QJsonObject none{{"none", true}, {"time", QDateTime::currentSecsSinceEpoch()}};
-            QFile f(cacheFile);
-            if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(none).toJson(QJsonDocument::Compact));
+            writeFileAtomic(cacheFile, QJsonDocument(none).toJson(QJsonDocument::Compact));
             emit ready(token, {});
             return;
         }
@@ -219,8 +218,7 @@ void LyricsFetcher::search(const TrackInfo &t, quint64 token, const QString &cac
 void LyricsFetcher::finish(quint64 token, const QString &cacheFile, const QString &synced, const QString &plain, bool instrumental)
 {
     QJsonObject o{{"synced", synced}, {"plain", plain}, {"instrumental", instrumental}, {"time", QDateTime::currentSecsSinceEpoch()}};
-    QFile f(cacheFile);
-    if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
+    writeFileAtomic(cacheFile, QJsonDocument(o).toJson(QJsonDocument::Compact));
     Lyrics l = parseLyrics(synced.isEmpty() ? plain : synced);
     l.instrumental = instrumental;
     l.source = "lrclib.net";

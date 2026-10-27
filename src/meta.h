@@ -9,6 +9,7 @@ struct TrackInfo {
     QString path, title, artist, album, albumArtist, genre, date, lyrics;
     int trackNo = 0, disc = 0;
     double duration = 0;
+    qint64 mtime = 0, size = 0;    // of the file when its tags were read: changed → read them again
     bool scanned = false;
 
     QString displayTitle() const;
@@ -20,4 +21,6 @@ QImage readCover(const QString &path);          // embedded picture, else an ima
 bool isAudioFile(const QString &path);
 QStringList expandPaths(const QStringList &paths); // folders → their audio files, sorted
 QString cacheDir(const QString &sub);
+bool fileChanged(const TrackInfo &t);              // stat only: the file differs from when it was read
+bool writeFileAtomic(const QString &path, const QByteArray &data);   // never leaves half a file
 QString formatTime(double sec);

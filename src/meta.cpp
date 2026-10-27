@@ -1,10 +1,12 @@
 #include "meta.h"
 #include "tagedit.h"
 #include <QCollator>
+#include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QSet>
 #include <QUrl>
@@ -38,6 +40,9 @@ TrackInfo readTrackInfo(const QString &path)
     TrackInfo t;
     t.path = path;
     t.scanned = true;
+    const QFileInfo fi(path);
+    t.mtime = fi.lastModified().toMSecsSinceEpoch();
+    t.size = fi.size();
     AVFormatContext *fmt = nullptr;
     const QByteArray p = path.toUtf8();
     if (avformat_open_input(&fmt, p.constData(), nullptr, nullptr) < 0) return t;
@@ -171,6 +176,22 @@ QString cacheDir(const QString &sub)
     const QString d = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation) + "/sonata/" + sub;
     QDir().mkpath(d);
     return d;
+}
+
+bool fileChanged(const TrackInfo &t)
+{
+    const QFileInfo fi(t.path);
+    if (!fi.exists()) return false;   // gone: nothing new to read (it shows as failed when played)
+    return fi.lastModified().toMSecsSinceEpoch() != t.mtime || fi.size() != t.size;
+}
+
+bool writeFileAtomic(const QString &path, const QByteArray &data)
+{
+    QDir().mkpath(QFileInfo(path).path());
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    f.write(data);
+    return f.commit();
 }
 
 QString formatTime(double sec)

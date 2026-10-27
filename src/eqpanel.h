@@ -42,7 +42,7 @@ private:
     EqSettings s_;
     QVector<EqPreset> custom_;
     QCheckBox *enabled_, *auto_;
-    QComboBox *presets_;
+    QComboBox *presets_, *rg_;
     QSlider *pre_;
     QLabel *preVal_;
     QSlider *band_[kBands];

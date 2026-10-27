@@ -25,6 +25,7 @@ quint64 Playlist::newUid()
 Playlist::Playlist(const QString &name, QObject *parent) : QAbstractTableModel(parent), name_(name)
 {
     id_ = QString::number(QDateTime::currentMSecsSinceEpoch(), 36) + QString::number(newUid(), 36);
+    connect(this, &Playlist::changed, this, [this] { dirty_ = true; });
 }
 
 void Playlist::setName(const QString &n)
@@ -35,9 +36,13 @@ void Playlist::setName(const QString &n)
 
 int Playlist::rowOf(quint64 uid) const
 {
-    for (int i = 0; i < items_.size(); ++i)
-        if (items_[i].uid == uid) return i;
-    return -1;
+    if (!indexed_) {
+        rowIdx_.clear();
+        rowIdx_.reserve(items_.size());
+        for (int i = 0; i < items_.size(); ++i) rowIdx_.insert(items_[i].uid, i);
+        indexed_ = true;
+    }
+    return rowIdx_.value(uid, -1);
 }
 
 const Item *Playlist::find(quint64 uid) const
@@ -61,6 +66,7 @@ void Playlist::insertPaths(const QStringList &paths, int row)
     }
     items_.insert(row, add.size(), Item{});
     std::copy(add.begin(), add.end(), items_.begin() + row);
+    reindex();
     endInsertRows();
     scan(row, row + paths.size());
     emit changed();
@@ -103,11 +109,17 @@ void Playlist::removeRowsList(QList<int> rows)
 {
     std::sort(rows.begin(), rows.end(), std::greater<int>());
     rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
-    for (int r : rows) {
-        if (r < 0 || r >= items_.size()) continue;
-        beginRemoveRows({}, r, r);
-        items_.remove(r);
+    rows.removeIf([this](int r) { return r < 0 || r >= items_.size(); });
+    // one removal per run of consecutive rows, from the bottom up
+    for (int i = 0; i < rows.size();) {
+        int j = i;
+        while (j + 1 < rows.size() && rows[j + 1] == rows[j] - 1) ++j;
+        const int first = rows[j], last = rows[i];
+        beginRemoveRows({}, first, last);
+        items_.remove(first, last - first + 1);
+        reindex();
         endRemoveRows();
+        i = j + 1;
     }
     emit changed();
 }
@@ -116,6 +128,7 @@ void Playlist::clear()
 {
     beginResetModel();
     items_.clear();
+    reindex();
     endResetModel();
     emit changed();
 }
@@ -148,6 +161,51 @@ void Playlist::updateInfo(const QString &path, const TrackInfo &info)
     emit changed();
 }
 
+void Playlist::setTracks(const QVector<TrackInfo> &tracks)
+{
+    beginResetModel();
+    items_.clear();
+    items_.reserve(tracks.size());
+    for (const TrackInfo &t : tracks) {
+        Item it;
+        it.uid = newUid();
+        it.info = t;
+        it.info.lyrics.clear();
+        items_ << it;
+    }
+    reindex();
+    endResetModel();
+    emit changed();
+}
+
+// A stat per file on the pool (a few ms for thousands); only what changed is read again.
+void Playlist::refreshChanged()
+{
+    QVector<QPair<quint64, TrackInfo>> job;
+    for (const Item &it : items_)
+        if (it.info.scanned) job.push_back({it.uid, it.info});
+    if (job.isEmpty()) return;
+    QPointer<Playlist> self(this);
+    QThreadPool::globalInstance()->start([self, job] {
+        QSet<quint64> stale;
+        for (const auto &[uid, info] : job)
+            if (fileChanged(info)) stale.insert(uid);
+        if (stale.isEmpty()) return;
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [self, stale] {
+            if (!self) return;
+            int lo = INT_MAX, hi = -1;
+            for (quint64 uid : stale) {
+                const int r = self->rowOf(uid);
+                if (r < 0) continue;
+                self->items_[r].info.scanned = false;
+                lo = std::min(lo, r);
+                hi = std::max(hi, r);
+            }
+            if (hi >= 0) self->scan(lo, hi + 1);
+        });
+    });
+}
+
 void Playlist::sortBy(int col)
 {
     QCollator coll;
@@ -164,7 +222,16 @@ void Playlist::sortBy(int col)
         }
     };
     beginResetModel();
-    std::stable_sort(items_.begin(), items_.end(), [&](const Item &a, const Item &b) { return coll.compare(key(a), key(b)) < 0; });
+    // keys once per item, not once per comparison
+    QVector<QPair<QCollatorSortKey, int>> keys;
+    keys.reserve(items_.size());
+    for (int i = 0; i < items_.size(); ++i) keys.push_back({coll.sortKey(key(items_[i])), i});
+    std::stable_sort(keys.begin(), keys.end(), [](const auto &a, const auto &b) { return a.first.compare(b.first) < 0; });
+    QVector<Item> sorted;
+    sorted.reserve(items_.size());
+    for (const auto &k : keys) sorted.push_back(items_[k.second]);
+    items_ = std::move(sorted);
+    reindex();
     endResetModel();
     emit changed();
 }
@@ -296,9 +363,12 @@ bool Playlist::dropMimeData(const QMimeData *m, Qt::DropAction, int row, int, co
                 for (const Item &it : moving) ids.insert(it.uid);
                 items_.erase(std::remove_if(items_.begin(), items_.end(), [&](const Item &i) { return ids.contains(i.uid); }), items_.end());
                 row -= before;
+            } else {
+                for (Item &it : moving) it.uid = newUid();
             }
             row = std::clamp(row, 0, int(items_.size()));
             for (int i = 0; i < moving.size(); ++i) items_.insert(row + i, moving[i]);
+            reindex();
             endResetModel();
             emit changed();
             return true;
@@ -333,6 +403,8 @@ QJsonObject Playlist::toJson() const
             o["dn"] = t.disc;
             o["d"] = t.duration;
             o["y"] = t.date;
+            o["m"] = t.mtime;
+            o["s"] = t.size;
         }
         arr << o;
     }
@@ -358,22 +430,24 @@ Playlist *Playlist::fromJson(const QJsonObject &o, QObject *parent)
             it.info.disc = j.value("dn").toInt();
             it.info.duration = j.value("d").toDouble();
             it.info.date = j.value("y").toString();
+            it.info.mtime = j.value("m").toInteger();
+            it.info.size = j.value("s").toInteger();
         }
         pl->items_ << it;
     }
     pl->scan(0, pl->items_.size());
+    pl->refreshChanged();
+    pl->dirty_ = false;
     return pl;
 }
 
 bool Playlist::exportM3u(const QString &file) const
 {
-    QFile f(file);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
-    f.write("#EXTM3U\n");
+    QByteArray out = "#EXTM3U\n";
     for (const Item &i : items_) {
         const TrackInfo &t = i.info;
-        f.write(QString("#EXTINF:%1,%2 - %3\n").arg(int(t.duration)).arg(t.displayArtist(), t.displayTitle()).toUtf8());
-        f.write(t.path.toUtf8() + '\n');
+        out += QString("#EXTINF:%1,%2 - %3\n").arg(int(t.duration)).arg(t.displayArtist(), t.displayTitle()).toUtf8();
+        out += t.path.toUtf8() + '\n';
     }
-    return true;
+    return writeFileAtomic(file, out);
 }

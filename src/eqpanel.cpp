@@ -120,6 +120,25 @@ EqPanel::EqPanel(QWidget *parent) : QWidget(parent)
     auto_->setProperty("role", "caption");
     v->addWidget(auto_);
 
+    // ReplayGain works with the EQ on or off: it lives here because this is the sound page
+    auto *rgRow = new QHBoxLayout;
+    auto *rgLabel = new QLabel("Igualar volumen entre canciones");
+    rgLabel->setProperty("role", "caption");
+    rg_ = new QComboBox;
+    rg_->addItems({"No", "Por canción", "Por álbum"});
+    rg_->setToolTip("Usa las etiquetas ReplayGain de los archivos para que todas suenen igual de fuerte.\n"
+                    "«Por álbum» respeta las diferencias de volumen dentro de un mismo disco.\n"
+                    "Las canciones sin esas etiquetas suenan como siempre.");
+    rgRow->addWidget(rgLabel);
+    rgRow->addStretch();
+    rgRow->addWidget(rg_);
+    v->addLayout(rgRow);
+    connect(rg_, &QComboBox::activated, this, [this](int i) {
+        if (syncing_) return;
+        s_.replayGain = ReplayGain(i);
+        emit changed(s_);
+    });
+
 
     connect(enabled_, &QCheckBox::toggled, this, [this](bool on) {
         if (syncing_) return;
@@ -209,6 +228,7 @@ void EqPanel::syncUi()
     syncing_ = true;
     enabled_->setChecked(s_.enabled);
     auto_->setChecked(s_.autoPreamp);
+    rg_->setCurrentIndex(int(s_.replayGain));
     pre_->setValue(int(s_.preamp * 10));
     preVal_->setText(db(s_.preamp));
     for (int b = 0; b < kBands; ++b) {

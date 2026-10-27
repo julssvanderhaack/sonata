@@ -7,11 +7,48 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
+#include <libavutil/replaygain.h>
 #include <libswresample/swresample.h>
 }
 
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
+
+// FFmpeg channel → PipeWire position; channels without one get mixed down to stereo.
+static uint32_t spaPosition(AVChannel c)
+{
+    switch (c) {
+    case AV_CHAN_FRONT_LEFT: return SPA_AUDIO_CHANNEL_FL;
+    case AV_CHAN_FRONT_RIGHT: return SPA_AUDIO_CHANNEL_FR;
+    case AV_CHAN_FRONT_CENTER: return SPA_AUDIO_CHANNEL_FC;
+    case AV_CHAN_LOW_FREQUENCY: return SPA_AUDIO_CHANNEL_LFE;
+    case AV_CHAN_BACK_LEFT: return SPA_AUDIO_CHANNEL_RL;
+    case AV_CHAN_BACK_RIGHT: return SPA_AUDIO_CHANNEL_RR;
+    case AV_CHAN_FRONT_LEFT_OF_CENTER: return SPA_AUDIO_CHANNEL_FLC;
+    case AV_CHAN_FRONT_RIGHT_OF_CENTER: return SPA_AUDIO_CHANNEL_FRC;
+    case AV_CHAN_BACK_CENTER: return SPA_AUDIO_CHANNEL_RC;
+    case AV_CHAN_SIDE_LEFT: return SPA_AUDIO_CHANNEL_SL;
+    case AV_CHAN_SIDE_RIGHT: return SPA_AUDIO_CHANNEL_SR;
+    case AV_CHAN_TOP_CENTER: return SPA_AUDIO_CHANNEL_TC;
+    case AV_CHAN_TOP_FRONT_LEFT: return SPA_AUDIO_CHANNEL_TFL;
+    case AV_CHAN_TOP_FRONT_CENTER: return SPA_AUDIO_CHANNEL_TFC;
+    case AV_CHAN_TOP_FRONT_RIGHT: return SPA_AUDIO_CHANNEL_TFR;
+    case AV_CHAN_TOP_BACK_LEFT: return SPA_AUDIO_CHANNEL_TRL;
+    case AV_CHAN_TOP_BACK_CENTER: return SPA_AUDIO_CHANNEL_TRC;
+    case AV_CHAN_TOP_BACK_RIGHT: return SPA_AUDIO_CHANNEL_TRR;
+    case AV_CHAN_LOW_FREQUENCY_2: return SPA_AUDIO_CHANNEL_LFE2;
+    default: return SPA_AUDIO_CHANNEL_UNKNOWN;
+    }
+}
+
+// "-6.52 dB" → -6.52; NAN when missing
+static float parseDb(const char *v)
+{
+    if (!v) return NAN;
+    char *end = nullptr;
+    const float f = std::strtof(v, &end);
+    return end == v ? NAN : f;
+}
 
 // ───────────────────────────── Decoder ──────────────────────────────
 
@@ -45,12 +82,29 @@ public:
             av_channel_layout_uninit(&cc_->ch_layout);
             av_channel_layout_default(&cc_->ch_layout, n);
         }
-        channels = cc_->ch_layout.nb_channels >= 2 ? 2 : 1;
         if (rate <= 0 || cc_->ch_layout.nb_channels <= 0) {
             err = "Formato de audio desconocido";
             return false;
         }
+        // Surround goes out as it is (PipeWire mixes it down for two speakers);
+        // layouts PipeWire has no names for are mixed down to stereo here.
+        const int inCh = cc_->ch_layout.nb_channels;
+        bool native = inCh > 2 && inCh <= kMaxChannels;
+        for (int i = 0; native && i < inCh; ++i)
+            native = spaPosition(av_channel_layout_channel_from_index(&cc_->ch_layout, i)) != SPA_AUDIO_CHANNEL_UNKNOWN;
+        positions.fill(SPA_AUDIO_CHANNEL_UNKNOWN);
+        if (native) {
+            channels = inCh;
+            av_channel_layout_copy(&outLayout_, &cc_->ch_layout);
+            for (int i = 0; i < inCh; ++i) positions[i] = spaPosition(av_channel_layout_channel_from_index(&cc_->ch_layout, i));
+        } else {
+            channels = inCh >= 2 ? 2 : 1;
+            av_channel_layout_default(&outLayout_, channels);
+            if (channels == 1) positions[0] = SPA_AUDIO_CHANNEL_MONO;
+            else positions[0] = SPA_AUDIO_CHANNEL_FL, positions[1] = SPA_AUDIO_CHANNEL_FR;
+        }
         if (!setupSwr(err)) return false;
+        readReplayGain(st);
 
         if (fmt_->duration > 0) duration = fmt_->duration / double(AV_TIME_BASE);
         else if (st->duration > 0) duration = st->duration * av_q2d(st->time_base);
@@ -70,8 +124,15 @@ public:
         if (!lossless && br > 0) parts << QString("%1 kbps").arg(br / 1000);
         parts << es.toString(rate / 1000.0, 'g', 4) + " kHz";
         if (lossless && bits > 0) parts << QString("%1 bit").arg(bits);
-        const int inCh = cc_->ch_layout.nb_channels;
-        parts << (inCh == 1 ? "mono" : inCh == 2 ? "estéreo" : QString("%1 canales → estéreo").arg(inCh));
+        if (inCh == 1) parts << "mono";
+        else if (inCh == 2) parts << "estéreo";
+        else if (native) {
+            char desc[64] = {};
+            av_channel_layout_describe(&cc_->ch_layout, desc, sizeof desc);
+            QString d = QString::fromLatin1(desc);
+            d = d.section('(', 0, 0);   // "5.1(side)" → "5.1"
+            parts << (d.contains('.') ? d : QString("%1 canales").arg(inCh));
+        } else parts << QString("%1 canales → estéreo").arg(inCh);
         info = parts.join(" · ");
 
         pkt_ = av_packet_alloc();
@@ -119,10 +180,25 @@ public:
         }
     }
 
+    // ReplayGain as a linear factor (1 = untagged or off), never above what the peak allows
+    float gain(ReplayGain mode) const
+    {
+        if (mode == ReplayGain::Off) return 1.0f;
+        float db = mode == ReplayGain::Album && !std::isnan(albumDb) ? albumDb : trackDb;
+        float peak = mode == ReplayGain::Album && !std::isnan(albumDb) ? albumPeak : trackPeak;
+        if (std::isnan(db)) db = albumDb, peak = albumPeak;
+        if (std::isnan(db)) return 1.0f;
+        float g = std::pow(10.0f, db / 20.0f);
+        if (peak > 0) g = std::min(g, 1.0f / peak);
+        return g;
+    }
+
     int rate = 0, channels = 2;
+    std::array<uint32_t, kMaxChannels> positions{};
     double duration = 0;
     bool eof = false;
     QString info;
+    float trackDb = NAN, trackPeak = 0, albumDb = NAN, albumPeak = 0;
 
 private:
     bool fail(int r, QString &err)
@@ -135,13 +211,35 @@ private:
 
     bool setupSwr(QString &err)
     {
-        AVChannelLayout outLayout;
-        av_channel_layout_default(&outLayout, channels);
-        int r = swr_alloc_set_opts2(&swr_, &outLayout, AV_SAMPLE_FMT_FLT, rate, &cc_->ch_layout, cc_->sample_fmt,
+        int r = swr_alloc_set_opts2(&swr_, &outLayout_, AV_SAMPLE_FMT_FLT, rate, &cc_->ch_layout, cc_->sample_fmt,
                                     cc_->sample_rate, 0, nullptr);
-        av_channel_layout_uninit(&outLayout);
         if (r < 0 || (r = swr_init(swr_)) < 0) return fail(r, err);
         return true;
+    }
+
+    // REPLAYGAIN_* tags (Vorbis, APE, ID3 TXXX, MP4 freeform), Opus R128 tags,
+    // and what FFmpeg itself found (LAME header) as a last resort.
+    void readReplayGain(AVStream *st)
+    {
+        auto get = [&](const char *key) -> const char * {
+            for (AVDictionary *d : {fmt_->metadata, st->metadata})
+                if (const AVDictionaryEntry *e = av_dict_get(d, key, nullptr, 0)) return e->value;
+            return nullptr;
+        };
+        trackDb = parseDb(get("REPLAYGAIN_TRACK_GAIN"));
+        trackPeak = std::isnan(parseDb(get("REPLAYGAIN_TRACK_PEAK"))) ? 0 : parseDb(get("REPLAYGAIN_TRACK_PEAK"));
+        albumDb = parseDb(get("REPLAYGAIN_ALBUM_GAIN"));
+        albumPeak = std::isnan(parseDb(get("REPLAYGAIN_ALBUM_PEAK"))) ? 0 : parseDb(get("REPLAYGAIN_ALBUM_PEAK"));
+        // Opus: Q7.8 dB relative to -23 LUFS; ReplayGain's reference is 5 dB louder
+        if (std::isnan(trackDb) && get("R128_TRACK_GAIN")) trackDb = std::atoi(get("R128_TRACK_GAIN")) / 256.0f + 5.0f;
+        if (std::isnan(albumDb) && get("R128_ALBUM_GAIN")) albumDb = std::atoi(get("R128_ALBUM_GAIN")) / 256.0f + 5.0f;
+        if (!std::isnan(trackDb) || !std::isnan(albumDb)) return;
+        const AVPacketSideData *sd = av_packet_side_data_get(st->codecpar->coded_side_data, st->codecpar->nb_coded_side_data,
+                                                             AV_PKT_DATA_REPLAYGAIN);
+        if (!sd || sd->size < sizeof(AVReplayGain)) return;
+        const auto *rg = reinterpret_cast<const AVReplayGain *>(sd->data);
+        if (rg->track_gain != INT32_MIN) trackDb = rg->track_gain / 100000.0f, trackPeak = rg->track_peak / 100000.0f;
+        if (rg->album_gain != INT32_MIN) albumDb = rg->album_gain / 100000.0f, albumPeak = rg->album_peak / 100000.0f;
     }
 
     void convert(std::vector<float> &out)
@@ -180,6 +278,7 @@ private:
 
     void close()
     {
+        av_channel_layout_uninit(&outLayout_);
         av_packet_free(&pkt_);
         av_frame_free(&frm_);
         swr_free(&swr_);
@@ -192,6 +291,7 @@ private:
     SwrContext *swr_ = nullptr;
     AVPacket *pkt_ = nullptr;
     AVFrame *frm_ = nullptr;
+    AVChannelLayout outLayout_{};
     int stream_ = -1;
     double tb_ = 0, skipTo_ = -1;
     bool flushing_ = false;
@@ -201,7 +301,7 @@ private:
 
 class Output {
 public:
-    Output(Ring &ring, Dsp &dsp) : ring_(ring), dsp_(dsp)
+    Output(Ring &ring, Dsp &dsp, std::function<void()> onLost) : ring_(ring), dsp_(dsp), onLost_(std::move(onLost))
     {
         pw_init(nullptr, nullptr);
         loop_ = pw_thread_loop_new("sonata", nullptr);
@@ -216,48 +316,29 @@ public:
         pw_thread_loop_destroy(loop_);
     }
 
-    int rate() const { return rate_; }
-    int channels() const { return ch_; }
+    int rate() const { return rate_.load(std::memory_order_relaxed); }
+    int channels() const { return ch_.load(std::memory_order_relaxed); }
+    const std::array<uint32_t, kMaxChannels> &positions() const { return pos_; }   // decoder thread only
 
-    void open(int rate, int ch)
+    void open(int rate, int ch, const std::array<uint32_t, kMaxChannels> &pos)
     {
         pw_thread_loop_lock(loop_);
         destroyStream();
         rate_ = rate;
         ch_ = ch;
-        // ~23 ms quanta: imperceptible for pause/seek/EQ, few wakeups.
-        const QByteArray lat = QByteArray::number(1024) + "/" + QByteArray::number(rate);
-        const QByteArray nodeRate = "1/" + QByteArray::number(rate);
-        pw_properties *props = pw_properties_new(
-            PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Playback", PW_KEY_MEDIA_ROLE, "Music",
-            PW_KEY_APP_NAME, "Sonata", PW_KEY_APP_ID, "sonata", PW_KEY_APP_ICON_NAME, "sonata",
-            PW_KEY_NODE_NAME, "sonata", PW_KEY_NODE_DESCRIPTION, "Sonata",
-            PW_KEY_NODE_LATENCY, lat.constData(), PW_KEY_NODE_RATE, nodeRate.constData(), nullptr);
-        static const pw_stream_events events = [] {
-            pw_stream_events e{};
-            e.version = PW_VERSION_STREAM_EVENTS;
-            e.process = &Output::onProcess;
-            return e;
-        }();
-        if (const QByteArray t = qgetenv("SONATA_TARGET"); !t.isEmpty())   // tests: play into a null sink
-            pw_properties_set(props, PW_KEY_TARGET_OBJECT, t.constData());
-        stream_ = pw_stream_new_simple(pw_thread_loop_get_loop(loop_), "sonata", props, &events, this);
+        pos_ = pos;
+        createStream();
+        pw_thread_loop_unlock(loop_);
+    }
 
-        uint8_t buffer[1024];
-        spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof buffer);
-        spa_audio_info_raw info{};
-        info.format = SPA_AUDIO_FORMAT_F32;
-        info.rate = uint32_t(rate);
-        info.channels = uint32_t(ch);
-        if (ch == 1) info.position[0] = SPA_AUDIO_CHANNEL_MONO;
-        else {
-            info.position[0] = SPA_AUDIO_CHANNEL_FL;
-            info.position[1] = SPA_AUDIO_CHANNEL_FR;
+    // PipeWire went away (restarted, crashed): build the stream again, same format.
+    void reopen()
+    {
+        pw_thread_loop_lock(loop_);
+        if (rate_ > 0) {
+            destroyStream();
+            createStream();
         }
-        const spa_pod *params[1] = {spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info)};
-        auto flags = pw_stream_flags(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS
-                                     | (active_ ? 0 : PW_STREAM_FLAG_INACTIVE));
-        pw_stream_connect(stream_, PW_DIRECTION_OUTPUT, PW_ID_ANY, flags, params, 1);
         pw_thread_loop_unlock(loop_);
     }
 
@@ -269,15 +350,64 @@ public:
         pw_thread_loop_unlock(loop_);
     }
 
-    // Samples (frames × channels) handed to PipeWire but not yet heard.
+    // Samples (frames × channels) handed to PipeWire, or held by the limiter, but not yet heard.
     uint64_t pendingSamples() const { return pending_.load(std::memory_order_relaxed); }
 
 private:
+    void createStream()   // loop locked
+    {
+        // ~23 ms quanta: imperceptible for pause/seek/EQ, few wakeups.
+        const QByteArray lat = QByteArray::number(1024) + "/" + QByteArray::number(rate_.load());
+        const QByteArray nodeRate = "1/" + QByteArray::number(rate_.load());
+        pw_properties *props = pw_properties_new(
+            PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Playback", PW_KEY_MEDIA_ROLE, "Music",
+            PW_KEY_APP_NAME, "Sonata", PW_KEY_APP_ID, "sonata", PW_KEY_APP_ICON_NAME, "sonata",
+            PW_KEY_NODE_NAME, "sonata", PW_KEY_NODE_DESCRIPTION, "Sonata",
+            PW_KEY_NODE_LATENCY, lat.constData(), PW_KEY_NODE_RATE, nodeRate.constData(), nullptr);
+        static const pw_stream_events events = [] {
+            pw_stream_events e{};
+            e.version = PW_VERSION_STREAM_EVENTS;
+            e.process = &Output::onProcess;
+            e.state_changed = &Output::onState;
+            return e;
+        }();
+        if (const QByteArray t = qgetenv("SONATA_TARGET"); !t.isEmpty())   // tests: play into a null sink
+            pw_properties_set(props, PW_KEY_TARGET_OBJECT, t.constData());
+        stream_ = pw_stream_new_simple(pw_thread_loop_get_loop(loop_), "sonata", props, &events, this);
+        if (!stream_) {   // no PipeWire right now: try again shortly
+            onLost_();
+            return;
+        }
+
+        uint8_t buffer[1024];
+        spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof buffer);
+        spa_audio_info_raw info{};
+        info.format = SPA_AUDIO_FORMAT_F32;
+        info.rate = uint32_t(rate_.load());
+        info.channels = uint32_t(ch_.load());
+        for (int c = 0; c < ch_ && c < kMaxChannels; ++c) info.position[c] = pos_[c];
+        const spa_pod *params[1] = {spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info)};
+        auto flags = pw_stream_flags(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS
+                                     | (active_ ? 0 : PW_STREAM_FLAG_INACTIVE));
+        pw_stream_connect(stream_, PW_DIRECTION_OUTPUT, PW_ID_ANY, flags, params, 1);
+    }
+
     void destroyStream()
     {
+        closing_ = true;   // our own disconnect is not a lost connection
         if (stream_) pw_stream_destroy(stream_);
+        closing_ = false;
         stream_ = nullptr;
         pending_ = 0;
+    }
+
+    // An unplugged or switched output is WirePlumber's job (it moves the
+    // stream to the new default). Only a dead connection needs us.
+    static void onState(void *data, pw_stream_state, pw_stream_state state, const char *)
+    {
+        auto *o = static_cast<Output *>(data);
+        if (o->closing_) return;
+        if (state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED) o->onLost_();
     }
 
     static void onProcess(void *data)
@@ -288,13 +418,16 @@ private:
         spa_data &d = b->buffer->datas[0];
         auto *dst = static_cast<float *>(d.data);
         if (!dst) return;
-        const uint32_t stride = sizeof(float) * uint32_t(o->ch_);
+        const int ch = o->ch_.load(std::memory_order_relaxed);
+        const uint32_t stride = sizeof(float) * uint32_t(ch);
         uint32_t frames = d.maxsize / stride;
         if (b->requested) frames = std::min<uint32_t>(frames, uint32_t(b->requested));
-        const size_t want = size_t(frames) * o->ch_;
-        const size_t got = o->ring_.read(dst, want);
+        const unsigned live = o->dsp_.begin(frames);
+        const size_t want = size_t(live) * ch;
+        bool jump = false;
+        const size_t got = o->ring_.read(dst, want, &jump);
         if (got < want) std::memset(dst + got, 0, (want - got) * sizeof(float));
-        o->dsp_.process(dst, frames);
+        o->dsp_.process(dst, frames, live, jump);
         d.chunk->offset = 0;
         d.chunk->stride = int32_t(stride);
         d.chunk->size = frames * stride;
@@ -302,7 +435,7 @@ private:
         pw_time t{};
         if (pw_stream_get_time_n(o->stream_, &t, sizeof t) == 0 && t.rate.denom) {
             const double delayFrames = double(t.delay) * t.rate.num * o->rate_ / t.rate.denom;
-            o->pending_.store(uint64_t((std::max(0.0, delayFrames) + t.buffered + frames) * o->ch_),
+            o->pending_.store(uint64_t((std::max(0.0, delayFrames) + t.buffered + frames + Dsp::kLookahead) * ch),
                               std::memory_order_relaxed);
         }
         pw_stream_queue_buffer(o->stream_, b);
@@ -310,10 +443,12 @@ private:
 
     Ring &ring_;
     Dsp &dsp_;
+    std::function<void()> onLost_;
     pw_thread_loop *loop_ = nullptr;
     pw_stream *stream_ = nullptr;
-    int rate_ = 0, ch_ = 0;
-    bool active_ = false;
+    std::atomic<int> rate_{0}, ch_{0};
+    std::array<uint32_t, kMaxChannels> pos_{};
+    bool active_ = false, closing_ = false;
     std::atomic<uint64_t> pending_{0};
 };
 
@@ -328,9 +463,21 @@ int Engine::scopeSnapshot(float *out, size_t n) const
 
 Engine::Engine(QObject *parent) : QObject(parent), ring_(1u << 18)
 {
-    out_ = std::make_unique<Output>(ring_, dsp_);
+    // any thread (PipeWire's, ours): rebuild the stream from the GUI thread, a little later
+    out_ = std::make_unique<Output>(ring_, dsp_, [this] {
+        QMetaObject::invokeMethod(this, [this] { if (!reconnect_.isActive()) reconnect_.start(); }, Qt::QueuedConnection);
+    });
     poll_.setInterval(250);   // seek bar and clock; the lyrics extrapolate between ticks
     connect(&poll_, &QTimer::timeout, this, &Engine::pollAudible);
+    reconnect_.setSingleShot(true);
+    reconnect_.setInterval(500);
+    connect(&reconnect_, &QTimer::timeout, this, [this] { out_->reopen(); });
+    // the stream stops only once the fade-out has played
+    idle_.setSingleShot(true);
+    idle_.setInterval(120);
+    connect(&idle_, &QTimer::timeout, this, [this] {
+        if (state_ != Playing) out_->setActive(false);
+    });
     thread_ = std::thread([this] { run(); });
 }
 
@@ -354,6 +501,8 @@ void Engine::play(const QString &path, quint64 token, double startSec, bool paus
     cv_.notify_all();
     eofAll_ = false;
     drainTicks_ = 0;
+    idle_.stop();
+    dsp_.setPaused(paused);
     out_->setActive(!paused);
     setState(paused ? Paused : Playing);
 }
@@ -371,8 +520,20 @@ void Engine::setNext(const QString &path, quint64 token)
 void Engine::setPaused(bool paused)
 {
     if (state_ == Stopped) return;
-    out_->setActive(!paused);
+    dsp_.setPaused(paused);
+    if (paused) idle_.start();
+    else {
+        idle_.stop();
+        out_->setActive(true);
+    }
     setState(paused ? Paused : Playing);
+}
+
+void Engine::setReplayGain(ReplayGain mode)
+{
+    if (rgMode_.exchange(mode) == mode) return;
+    // what is already decoded carries the old gain: decode again from where we are
+    if (state_ != Stopped) seek(position());
 }
 
 void Engine::stop()
@@ -382,7 +543,8 @@ void Engine::stop()
         cmd_ = {Command::Stop};
     }
     cv_.notify_all();
-    out_->setActive(false);
+    dsp_.setPaused(true);
+    idle_.start();
     setState(Stopped);
 }
 
@@ -448,8 +610,12 @@ double Engine::duration() const
 QString Engine::formatInfo() const
 {
     std::lock_guard sl(segMx_);
-    for (const Segment &s : segs_)
-        if (s.token == audible_) return s.info;
+    for (const Segment &s : segs_) {
+        if (s.token != audible_) continue;
+        if (s.gain == 1.0f) return s.info;
+        const double db = 20 * std::log10(double(s.gain));
+        return s.info + " · " + QLocale("es_ES").toString(db, 'f', 1).replace('-', QChar(0x2212)) + " dB";
+    }
     return {};
 }
 
@@ -499,13 +665,14 @@ bool Engine::openTrack(const QString &path, quint64 token, double startSec, bool
     dec_ = std::move(d);
     pend_.clear();
     pendOff_ = 0;
-    Segment seg{0, token, startSec, dec_->duration, dec_->rate, dec_->channels, path, dec_->info};
-    const bool sameFmt = out_->rate() == dec_->rate && out_->channels() == dec_->channels;
+    Segment seg{0, token, startSec, dec_->duration, dec_->rate, dec_->channels, path, dec_->info,
+                dec_->gain(rgMode_.load()), dec_->positions};
+    const bool sameFmt = out_->rate() == dec_->rate && out_->channels() == dec_->channels && out_->positions() == dec_->positions;
     if (flush) {
         seg.start = ring_.flush();
         if (!sameFmt) {
             dsp_.setFormat(dec_->rate, dec_->channels);
-            out_->open(dec_->rate, dec_->channels);
+            out_->open(dec_->rate, dec_->channels, dec_->positions);
         }
         std::lock_guard sl(segMx_);
         segs_ = {seg};
@@ -545,6 +712,7 @@ void Engine::handle(const Command &c)
             pendOff_ = 0;
             seg.start = ring_.flush();
             seg.startSec = c.sec;
+            seg.gain = dec_->gain(rgMode_.load());
             std::lock_guard sl(segMx_);
             segs_ = {seg};
         } else {
@@ -592,7 +760,7 @@ void Engine::run()
                 lk.unlock();
                 std::this_thread::sleep_for(std::chrono::milliseconds(120));   // let PipeWire play the tail
                 dsp_.setFormat(fmtSwitchSeg_.rate, fmtSwitchSeg_.channels);
-                out_->open(fmtSwitchSeg_.rate, fmtSwitchSeg_.channels);
+                out_->open(fmtSwitchSeg_.rate, fmtSwitchSeg_.channels, fmtSwitchSeg_.positions);
                 fmtSwitchSeg_.start = ring_.flush();
                 {
                     std::lock_guard sl(segMx_);
@@ -638,6 +806,9 @@ void Engine::run()
         }
         lk.unlock();
         dec_->decode(pend_);
+        // ReplayGain here rather than in the realtime callback: exact at track boundaries, free when off
+        if (const float g = dec_->gain(rgMode_.load()); g != 1.0f)
+            for (float &x : pend_) x *= g;
         lk.lock();
     }
 }

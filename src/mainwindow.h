@@ -61,6 +61,7 @@ signals:
 
 protected:
     void closeEvent(QCloseEvent *) override;
+    void changeEvent(QEvent *) override;
     void keyPressEvent(QKeyEvent *) override;
     void resizeEvent(QResizeEvent *) override;
     bool eventFilter(QObject *o, QEvent *e) override;
@@ -74,6 +75,7 @@ private:
     QWidget *buildTransport();
 
     Playlist *currentList() const;
+    QVector<Playlist *> allLists() const;   // tabs and the library's views
     void setExtrasVisible(bool on);
     void fitCover();
     void updateModeRow();
@@ -144,6 +146,8 @@ private:
     Repeat repeat_ = RepeatOff;
     QVector<quint64> history_;            // for "previous" in shuffle mode
     QSet<quint64> shufflePlayed_;
+    quint64 shufflePlanned_ = 0;
+    qint64 lastRefresh_ = 0;   // msecs: tags re-checked when the window comes back
     double resumePos_ = -1;
     float preMute_ = 0.8f;
     QString artFile_;

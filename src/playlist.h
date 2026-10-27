@@ -3,6 +3,7 @@
 #pragma once
 #include "meta.h"
 #include <QAbstractTableModel>
+#include <QHash>
 #include <QJsonObject>
 #include <QVector>
 
@@ -33,6 +34,8 @@ public:
     void setFailed(quint64 uid, bool f);
     void setPlaying(quint64 uid);
     void updateInfo(const QString &path, const TrackInfo &info);   // tags edited: every row with that file
+    void setTracks(const QVector<TrackInfo> &tracks);              // already read (library views)
+    void refreshChanged();   // in the background: files modified since their tags were read get read again
     void sortBy(int col);
     void removeDuplicates();
     double totalDuration() const;
@@ -42,6 +45,10 @@ public:
     bool exportM3u(const QString &file) const;
 
     static quint64 newUid();
+
+    // saving: only lists that changed since they were last written
+    bool dirty() const { return dirty_; }
+    void setSaved() { dirty_ = false; }
 
     // QAbstractTableModel
     int rowCount(const QModelIndex & = {}) const override { return items_.size(); }
@@ -61,7 +68,11 @@ signals:
 
 private:
     void scan(int from, int to);
+    void reindex() { indexed_ = false; }   // after anything that moves rows
     QString name_, id_;
     QVector<Item> items_;
     quint64 playing_ = 0;
+    bool dirty_ = false;
+    mutable bool indexed_ = false;
+    mutable QHash<quint64, int> rowIdx_;   // uid → row, rebuilt lazily
 };

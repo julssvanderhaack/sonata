@@ -12,7 +12,9 @@
 #include <QString>
 #include <QTimer>
 #include <atomic>
+#include <array>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -45,7 +47,12 @@ public:
 
     void setVolume(float v);
     float volume() const { return volume_; }
-    void setEq(const EqSettings &s) { dsp_.setEq(s); }
+    void setEq(const EqSettings &s)
+    {
+        dsp_.setEq(s);
+        setReplayGain(s.replayGain);
+    }
+    void setReplayGain(ReplayGain mode);
     // spectrum view: latest n mono frames as they reach the speaker; returns the sample rate
     void setScopeEnabled(bool on) { dsp_.scope().setEnabled(on); }
     int scopeSnapshot(float *out, size_t n) const;
@@ -65,6 +72,8 @@ private:
         double startSec, duration;
         int rate, channels;
         QString path, info;
+        float gain = 1;   // ReplayGain applied
+        std::array<uint32_t, kMaxChannels> positions{};
     };
     struct Command {
         enum Kind { None, Play, Seek, Stop } kind = None;
@@ -100,7 +109,8 @@ private:
     std::vector<Segment> segs_;
     std::atomic<bool> eofAll_{false};
 
-    QTimer poll_;
+    QTimer poll_, reconnect_, idle_;
+    std::atomic<ReplayGain> rgMode_{ReplayGain::Off};
     State state_ = Stopped;
     quint64 audible_ = 0;
     int drainTicks_ = 0;
