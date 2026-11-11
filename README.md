@@ -48,7 +48,9 @@ letras de las capturas son inventadas, y el tema es Cobalt2 de Omarchy.*
 - Un limitador en lugar de recortar cuando algo pasa de 0 dB, y fundidos
   cortos al pausar, saltar o mover el ecualizador: sin chasquidos.
 - **Espectro** en tiempo real: una curva continua de 20 Hz hasta la frecuencia de
-  Nyquist de la canción (la mitad de su frecuencia de muestreo).
+  Nyquist de la canción (la mitad de su frecuencia de muestreo). Un clic sobre él
+  cambia de estilo — curva, barras, bloques, espejo, línea u onda — y el clic
+  derecho deja elegirlo; se recuerda el último.
 - **Listas** en pestañas: arrastrar y soltar, búsqueda, ordenar, quitar duplicados,
   importar y exportar M3U.
 - Se adapta al tamaño de la ventana: lista y reproducción lado a lado, una encima de

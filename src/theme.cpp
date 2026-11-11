@@ -91,7 +91,9 @@ QString Theme::styleSheet() const
 {
     auto n = [](const QColor &c) { return c.name(QColor::HexArgb); };
     QColor hover = bgLight.lighter(dark ? 130 : 95);
-    QColor accentText = accent.lightness() > 140 ? bg : fg;
+    // by perceived brightness (a pure yellow is HSL-dark but needs dark text), whichever of bg/fg contrasts more
+    const auto luma = [](const QColor &c) { return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue(); };
+    QColor accentText = std::abs(luma(accent) - luma(bg)) > std::abs(luma(accent) - luma(fg)) ? bg : fg;
     QString s = R"(
 QWidget { background: %BG%; color: %FG%; }
 QToolTip { background: %BGL%; color: %FG%; border: 1px solid %MUTED%; padding: 4px; }
@@ -119,6 +121,11 @@ QToolButton[role="text"]:checked { color: %FG%; background: %BGL%; }
 QToolButton[role="pagetab"] { color: %DIM%; font-size: 12px; padding: 3px 7px; border-bottom: 2px solid transparent; }
 QToolButton[role="pagetab"]:hover { color: %FG%; }
 QToolButton[role="pagetab"]:checked { color: %FG%; border-bottom: 2px solid %ACC%; }   /* like the list tabs */
+/* Biblioteca | Listas: real buttons (filled, rounded), not underlined tabs */
+QToolButton[role="segment"] { color: %FG%; background: %BGL%; font-size: 12px; font-weight: bold; padding: 4px 14px; border: 1px solid %MUTED%; border-radius: 6px; }
+QToolButton[role="segment"]:hover { color: %FG%; border-color: %ACC%; }
+QToolButton[role="segment"]:pressed { background: %SEL%; }
+QToolButton[role="segment"]:checked { color: %ACCT%; background: %ACC%; border-color: %ACC%; }
 QTabBar { background: %BGD%; }
 QTabBar::tab { background: %BGD%; color: %DIM%; padding: 7px 14px; border: none; border-bottom: 2px solid transparent; }
 QTabBar::tab:selected { color: %FG%; background: %BG%; border-bottom: 2px solid %ACC%; }
