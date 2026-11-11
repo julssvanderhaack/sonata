@@ -1,7 +1,10 @@
 #include "spectrum.h"
 #include "engine.h"
 #include "theme.h"
+#include <QContextMenuEvent>
 #include <QLocale>
+#include <QMenu>
+#include <QMouseEvent>
 #include <QPainter>
 #include <cmath>
 #include <numbers>
@@ -9,6 +12,8 @@
 static constexpr unsigned kN = 4096;           // ~10.8 Hz per bin at 44.1 kHz
 static constexpr double kLoHz = 20;            // the axis ends at the track's Nyquist (rate / 2)
 static constexpr double kFloorDb = -72;        // bottom of the view
+static constexpr int kAnnounceMs = 1400;       // how long a newly chosen style shows its name
+static const char *const kStyleNames[SpectrumView::StyleCount] = {"Curva", "Barras", "Bloques", "Espejo", "Línea", "Onda"};
 
 SpectrumView::SpectrumView(Engine *engine, QWidget *parent) : QWidget(parent), engine_(engine)
 {
@@ -27,6 +32,8 @@ SpectrumView::SpectrumView(Engine *engine, QWidget *parent) : QWidget(parent), e
         bitrev_[i] = r;
     }
     setMinimumHeight(60);
+    setCursor(Qt::PointingHandCursor);
+    setToolTip("Clic para cambiar de estilo · clic derecho para elegirlo");
     setAttribute(Qt::WA_OpaquePaintEvent);   // we paint the background ourselves (cached)
     timer_.setInterval(33);
     timer_.setTimerType(Qt::PreciseTimer);
@@ -50,6 +57,36 @@ void SpectrumView::hideEvent(QHideEvent *)
 {
     engine_->setScopeEnabled(false);
     timer_.stop();
+}
+
+void SpectrumView::setStyle(int style, bool announce)
+{
+    style = std::clamp(style, 0, StyleCount - 1);
+    if (style == style_ && !announce) return;
+    style_ = style;
+    if (announce) {
+        announced_.start();
+        QTimer::singleShot(kAnnounceMs + 50, this, qOverload<>(&QWidget::update));   // also goes away while paused
+    }
+    update();
+}
+
+void SpectrumView::mousePressEvent(QMouseEvent *e)
+{
+    if (e->button() == Qt::LeftButton) setStyle((style_ + 1) % StyleCount, true);
+    else QWidget::mousePressEvent(e);
+}
+
+void SpectrumView::contextMenuEvent(QContextMenuEvent *e)
+{
+    QMenu menu(this);
+    for (int i = 0; i < StyleCount; ++i) {
+        QAction *a = menu.addAction(QString::fromUtf8(kStyleNames[i]));
+        a->setCheckable(true);
+        a->setChecked(i == style_);
+        connect(a, &QAction::triggered, this, [this, i] { setStyle(i, true); });
+    }
+    menu.exec(e->globalPos());
 }
 
 void SpectrumView::analyse(int rate, int points)
@@ -114,7 +151,10 @@ void SpectrumView::step()
     if (playing) {
         rate_ = engine_->scopeSnapshot(samples_.data(), kN);
         analyse(rate_, points);
-    } else target_.assign(size_t(points), 0.0f);
+    } else {
+        target_.assign(size_t(points), 0.0f);
+        for (float &v : samples_) v = std::abs(v) < 1e-3f ? 0 : v * 0.75f;   // the waveform settles to a flat line
+    }
 
     if (level_.size() != size_t(points)) {
         level_.assign(size_t(points), 0.0f);
@@ -136,6 +176,8 @@ void SpectrumView::step()
         } else if ((h -= float(dt)) < 0) p = std::max(l, p - float(dt * 0.25));
         moving |= l > 0 || p > 0.01f;
     }
+    if (!playing && style_ == Wave)
+        for (unsigned i = 0; i < kN && !moving; i += 8) moving = samples_[i] != 0;
     update();
     if (!playing && !moving) timer_.stop();   // the curve has settled; restarted on the next show
 }
@@ -157,7 +199,8 @@ static QString khz(double hz)
 void SpectrumView::paintBackground()
 {
     const Theme &t = Theme::get();
-    const QString key = QString("%1x%2 %3 %4 %5").arg(width()).arg(height()).arg(rate_).arg(t.bg.name(), t.accent.name());
+    const bool wave = style_ == Wave;   // time, not frequency: no axis
+    const QString key = QString("%1x%2 %3 %4 %5 %6").arg(width()).arg(height()).arg(rate_).arg(t.bg.name(), t.accent.name()).arg(wave);
     if (key == bgKey_ && !bg_.isNull()) return;
     bgKey_ = key;
     bg_ = QPixmap(size() * devicePixelRatioF());
@@ -172,6 +215,12 @@ void SpectrumView::paintBackground()
     auto xOf = [&](double hz) { return area.left() + area.width() * std::log(hz / kLoHz) / std::log(hi / kLoHz); };
     QColor grid = t.muted;
     grid.setAlphaF(0.35);
+    if (wave) {
+        const double y = std::round(area.center().y()) + 0.5;
+        p.setPen(QPen(grid, 1, Qt::DotLine));
+        p.drawLine(QPointF(area.left(), y), QPointF(area.right(), y));
+        return;
+    }
     for (double hz : {50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0, 50000.0, 100000.0}) {
         const double x = std::round(xOf(hz)) + 0.5;
         if (x > area.right() - 44) break;   // leave room for the Nyquist label
@@ -194,12 +243,36 @@ void SpectrumView::paintEvent(QPaintEvent *)
     QPainter p(this);
     p.drawPixmap(0, 0, bg_);
     const QRectF area = plotArea();
-    const int n = int(level_.size());
-    if (n < 2) {
+    if (style_ == Wave) paintWave(p, area);
+    else if (level_.size() < 2) {
         p.setPen(t.fgDim);
         p.drawText(area, Qt::AlignCenter, "El espectro aparecerá al reproducir");
-        return;
-    }
+    } else if (style_ == Curve || style_ == Line) paintCurve(p, area, style_ == Curve);
+    else paintBars(p, area);
+
+    if (announced_.isValid() && announced_.elapsed() < kAnnounceMs) {   // the style just chosen, top right
+        p.setRenderHint(QPainter::Antialiasing);
+        QFont f = font();
+        f.setPixelSize(11);
+        f.setBold(true);
+        p.setFont(f);
+        const QString name = QString::fromUtf8(kStyleNames[style_]);
+        const QRectF box(area.right() - p.fontMetrics().horizontalAdvance(name) - 26, area.top() + 6,
+                         p.fontMetrics().horizontalAdvance(name) + 18, 22);
+        QColor back = t.bgLight;
+        back.setAlphaF(0.92);
+        p.setPen(QPen(t.accent, 1));
+        p.setBrush(back);
+        p.drawRoundedRect(box, 6, 6);
+        p.setPen(t.fg);
+        p.drawText(box, Qt::AlignCenter, name);
+    } else announced_.invalidate();
+}
+
+void SpectrumView::paintCurve(QPainter &p, const QRectF &area, bool filled)
+{
+    const Theme &t = Theme::get();
+    const int n = int(level_.size());
     // the points are already smoothed (blur + easing), so straight segments
     // read as a continuous curve; only the line itself is antialiased, the fill
     // under it isn't (its edge is covered by the line) — this runs 30 times a second
@@ -210,18 +283,20 @@ void SpectrumView::paintEvent(QPaintEvent *)
         return poly;
     };
     const QPolygonF line = curve(level_);
-    QPolygonF fill = line;
-    fill << QPointF(area.right() + 1, area.bottom() + 1) << QPointF(area.left(), area.bottom() + 1);
-    QLinearGradient g(area.bottomLeft(), area.topLeft());
-    QColor lo = t.accent, top = t.accent.lighter(t.dark ? 130 : 105);
-    lo.setAlphaF(0.12);
-    top.setAlphaF(0.55);
-    g.setColorAt(0, lo);
-    g.setColorAt(1, top);
-    p.setPen(Qt::NoPen);
-    p.setBrush(g);
-    p.drawPolygon(fill);
-    p.setBrush(Qt::NoBrush);
+    if (filled) {
+        QPolygonF fill = line;
+        fill << QPointF(area.right() + 1, area.bottom() + 1) << QPointF(area.left(), area.bottom() + 1);
+        QLinearGradient g(area.bottomLeft(), area.topLeft());
+        QColor lo = t.accent, top = t.accent.lighter(t.dark ? 130 : 105);
+        lo.setAlphaF(0.12);
+        top.setAlphaF(0.55);
+        g.setColorAt(0, lo);
+        g.setColorAt(1, top);
+        p.setPen(Qt::NoPen);
+        p.setBrush(g);
+        p.drawPolygon(fill);
+        p.setBrush(Qt::NoBrush);
+    }
     p.setRenderHint(QPainter::Antialiasing);
     QColor peak = t.fgLight;
     peak.setAlphaF(0.35);
@@ -230,6 +305,102 @@ void SpectrumView::paintEvent(QPaintEvent *)
     // the curve, ~1.6 px thick: three 1 px strokes a fraction of a pixel apart
     // look the same as one wide pen, but take Qt's fast path for thin lines
     // instead of building and filling an outline (6x cheaper, every frame)
+    p.setPen(QPen(t.accent.lighter(t.dark ? 120 : 100), 1));
+    p.drawPolyline(line);
+    p.drawPolyline(line.translated(0, -0.7));
+    p.drawPolyline(line.translated(0.5, -0.35));
+}
+
+static QColor mix(const QColor &a, const QColor &b, double k)   // k of b over a
+{
+    return QColor::fromRgbF(a.redF() + (b.redF() - a.redF()) * k, a.greenF() + (b.greenF() - a.greenF()) * k,
+                            a.blueF() + (b.blueF() - a.blueF()) * k);
+}
+
+// Bars, Blocks (bars cut into LED-like segments) and Mirror (bars growing both
+// ways from the middle). Whole-pixel rectangles, no antialiasing.
+void SpectrumView::paintBars(QPainter &p, const QRectF &area)
+{
+    const Theme &t = Theme::get();
+    const int n = int(level_.size());
+    const int left = int(area.left()), top = int(area.top()), w = int(area.width()), h = int(area.height());
+    const int bottom = top + h;
+    const int bars = std::clamp(w / (style_ == Blocks ? 12 : 9), 8, n);
+    const int gap = w / bars >= 5 ? 2 : 1;
+    const int step = 4;   // Blocks: 3 px lit + 1 px dark
+    const bool mirror = style_ == Mirror;
+    const int cy = top + h / 2;
+
+    const QColor dim = mix(t.bg, t.accent, 0.45), bright = t.accent.lighter(t.dark ? 125 : 105);
+    QLinearGradient g(0, bottom, 0, top);
+    if (mirror) {
+        g.setColorAt(0, bright);
+        g.setColorAt(0.5, dim);
+        g.setColorAt(1, bright);
+    } else {
+        g.setColorAt(0, dim);
+        g.setColorAt(1, bright);
+    }
+    const QBrush brush(g);
+    QColor cap = t.fgLight;
+    cap.setAlphaF(0.6);
+    int tallest = 0;
+    for (int j = 0; j < bars; ++j) {
+        // a bar shows the loudest point of the stretch of curve it covers
+        const int a = j * n / bars, b = std::max(a + 1, (j + 1) * n / bars);
+        float lv = 0, pk = 0;
+        for (int i = a; i < b; ++i) {
+            lv = std::max(lv, level_[size_t(i)]);
+            pk = std::max(pk, peak_[size_t(i)]);
+        }
+        const int x0 = left + j * w / bars, bw = std::max(1, left + (j + 1) * w / bars - gap - x0);
+        if (mirror) {
+            const int half = int(std::lround(lv * (h / 2)));
+            if (half > 0) p.fillRect(x0, cy - half, bw, 2 * half, brush);
+            else p.fillRect(x0, cy, bw, 1, dim);   // a thin spine while silent
+            const int ph = int(std::lround(pk * (h / 2)));
+            if (ph > half + 1) {
+                p.fillRect(x0, cy - ph - 1, bw, 1, cap);
+                p.fillRect(x0, cy + ph, bw, 1, cap);
+            }
+            continue;
+        }
+        int bh = int(std::lround(lv * h)), ph = int(std::lround(pk * h));
+        if (style_ == Blocks) {
+            bh -= bh % step;
+            ph -= ph % step;
+        }
+        tallest = std::max(tallest, bh);
+        if (bh > 0) p.fillRect(x0, bottom - bh, bw, bh, brush);
+        if (ph > bh && ph > 2) p.fillRect(x0, bottom - ph, bw, style_ == Blocks ? step - 1 : 2, cap);
+    }
+    if (style_ == Blocks)   // cut the bars into segments: one dark row every `step` px, as far up as they reach
+        for (int y = bottom - step; y >= bottom - tallest; y -= step) p.fillRect(left, y, w, 1, t.bg);
+}
+
+// The sound itself rather than its spectrum: ~35 ms of waveform, started at a
+// rising zero crossing so that steady notes stand still instead of scrolling.
+void SpectrumView::paintWave(QPainter &p, const QRectF &area)
+{
+    const Theme &t = Theme::get();
+    const unsigned span = 1536, search = 1024;
+    unsigned start = kN - span - search;
+    for (unsigned i = start + 1; i < kN - span; ++i)
+        if (samples_[i - 1] < 0 && samples_[i] >= 0) {
+            start = i;
+            break;
+        }
+    const int pts = std::clamp(int(area.width() / 2), 2, 512);
+    const double cy = area.center().y(), half = area.height() / 2 - 1;
+    QPolygonF line(pts);
+    for (int i = 0; i < pts; ++i) {
+        const double pos = double(i) * (span - 1) / (pts - 1);
+        const unsigned k = start + unsigned(pos);
+        const double fr = pos - unsigned(pos);
+        const double v = samples_[k] * (1 - fr) + samples_[std::min(k + 1, kN - 1)] * fr;
+        line[i] = QPointF(area.left() + area.width() * i / (pts - 1), cy - std::clamp(v, -1.0, 1.0) * half);
+    }
+    p.setRenderHint(QPainter::Antialiasing);
     p.setPen(QPen(t.accent.lighter(t.dark ? 120 : 100), 1));
     p.drawPolyline(line);
     p.drawPolyline(line.translated(0, -0.7));

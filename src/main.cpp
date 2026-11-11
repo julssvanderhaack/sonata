@@ -6,6 +6,7 @@
 #include "libraryview.h"
 #include "mainwindow.h"
 #include "mpris.h"
+#include "spectrum.h"
 #include "theme.h"
 #include <QApplication>
 #include <QElapsedTimer>
@@ -210,6 +211,8 @@ int main(int argc, char **argv)
     if (!files.isEmpty()) w.addPaths(files, playNow);
     if (qEnvironmentVariableIsSet("SONATA_LIBOPEN"))   // tests: a library page ("album:<key>", "folder:<path>"…)
         QTimer::singleShot(1500, &w, [&w] { w.findChild<LibraryView *>()->openPage(qEnvironmentVariable("SONATA_LIBOPEN")); });
+    if (qEnvironmentVariableIsSet("SONATA_SPECSTYLE"))   // tests: spectrum style by number
+        QTimer::singleShot(1500, &w, [&w] { w.findChild<SpectrumView *>()->setStyle(qEnvironmentVariableIntValue("SONATA_SPECSTYLE")); });
     if (qEnvironmentVariableIsSet("SONATA_SEEK"))   // tests
         QTimer::singleShot(1500, &w, [&w] { w.seekTo(qEnvironmentVariable("SONATA_SEEK").toDouble()); });
     const int rc = app.exec();

@@ -885,8 +885,8 @@ QWidget *MainWindow::buildListPane()
     auto *modeRow = new QFrame;
     modeRow->setProperty("role", "panel");
     auto *h = new QHBoxLayout(modeRow);
-    h->setContentsMargins(6, 4, 6, 0);
-    h->setSpacing(0);
+    h->setContentsMargins(6, 6, 6, 6);
+    h->setSpacing(6);
     modeLib_ = new QToolButton;
     modeLib_->setText("Biblioteca");
     modeLib_->setToolTip("Tu música por álbumes, artistas y carpetas (Ctrl+B)");
@@ -895,12 +895,9 @@ QWidget *MainWindow::buildListPane()
     modeLists_->setToolTip("Tus listas de reproducción (Ctrl+B)");
     for (QToolButton *b : {modeLib_, modeLists_}) {
         b->setCheckable(true);
-        b->setProperty("role", "pagetab");
+        b->setProperty("role", "segment");
         b->setCursor(Qt::PointingHandCursor);
         b->setFocusPolicy(Qt::NoFocus);
-        QFont f = b->font();
-        f.setBold(true);
-        b->setFont(f);
         h->addWidget(b);
     }
     h->addStretch();
@@ -1727,6 +1724,7 @@ void MainWindow::saveState()
         {"page", pages_->currentWidget() == eqScroll_ ? "eq" : pages_->currentWidget() == spectrum_ ? "spectrum" : "lyrics"},
         {"listVisible", listPane_->isVisible()},
         {"extrasVisible", extrasWanted_},
+        {"spectrumStyle", spectrum_->style()},
     };
     o["libraryFolders"] = QJsonArray::fromStringList(lib_->roots());
     o["libraryAlbumSort"] = int(lib_->albumSort());
@@ -1796,6 +1794,7 @@ void MainWindow::loadState()
     engine_->setEq(eq);
     if (o.value("page").toString() == "eq") eqTab_->click();
     else if (o.value("page").toString() == "spectrum") specTab_->click();
+    spectrum_->setStyle(o.value("spectrumStyle").toInt());
     if (!o.value("extrasVisible").toBool(true)) setExtrasVisible(false);
 
     // the library: ~/Music (or the XDG music folder) unless the user chose others
